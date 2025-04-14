@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Screen Watcher</title>
+  <!-- Link to local Bootstrap CSS -->
+  <link rel="stylesheet" href="../vendor/bootstrap/bootstrap.min.css">
+  <link rel="stylesheet" href="../vendor/bootstrap-icons/bootstrap-icons.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="container-fluid p-0">
+    <div class="header">
+      <h3 class="title">AI Screen Watcher</h3>
+      <div class="status-indicator" id="statusIndicator">
+        <span class="status-dot idle"></span>
+        <span class="status-text" id="statusText">Idle</span>
+      </div>
+    </div>
+
+    <ul class="nav nav-tabs" id="mainTabs" role="tablist">
+      <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="capture-tab" data-bs-toggle="tab" data-bs-target="#capture" type="button" role="tab" aria-controls="capture" aria-selected="true">Capture</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="monitor-tab" data-bs-toggle="tab" data-bs-target="#monitor" type="button" role="tab" aria-controls="monitor" aria-selected="false">Monitor</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="history-tab" data-bs-toggle="tab" data-bs-target="#history" type="button" role="tab" aria-controls="history" aria-selected="false">History</button>
+      </li>
+      <li class="nav-item" role="presentation">
+        <button class="nav-link" id="dev-tab" data-bs-toggle="tab" data-bs-target="#dev" type="button" role="tab" aria-controls="dev" aria-selected="false">Dev</button>
+      </li>
+    </ul>
+
+    <div class="tab-content" id="mainTabsContent">
+      <!-- Capture Tab -->
+      <div class="tab-pane fade show active" id="capture" role="tabpanel" aria-labelledby="capture-tab">
+        <div class="tab-inner">
+          <div class="capture-options">
+            <div class="btn-group mb-3" role="group">
+              <button id="captureViewport" class="btn btn-sm btn-primary">Capture Viewport</button>
+              <button id="captureArea" class="btn btn-sm btn-primary">Select Area</button>
+              <button id="testAutoCaptureAnalyze" class="btn btn-sm btn-success">Test Auto-Capture</button>
+            </div>
+            
+            <div class="selection-info mb-3" id="selectionInfo" style="display: none;">
+              <div class="d-flex justify-content-between">
+                <span>Selected Area:</span>
+                <span id="dimensionsText">0 x 0 px</span>
+              </div>
+              <div class="d-flex justify-content-between">
+                <span>Total Pixels:</span>
+                <span id="pixelsText">0 px</span>
+              </div>
+              <div class="d-flex justify-content-between">
+                <span>Estimated Cost:</span>
+                <span id="costText">$0.00</span>
+              </div>
+            </div>
+            
+            <div class="form-group mb-3">
+              <label for="vlmModel" class="form-label">VLM Model:</label>
+              <select id="vlmModel" class="form-select form-select-sm">
+                <option value="anthropic/claude-3-haiku">Claude 3 Haiku</option>
+                <option value="meta-llama/llama-4-maverick:free">Llama 4 Maverick (Free)</option>
+                <option value="moonshotai/kimi-vl-a3b-thinking:free">Kimi VL (Free)</option>
+                <option value="google/gemini-pro-vision">Gemini Pro Vision</option>
+                <option value="openai/gpt-4-vision">GPT-4 Vision</option>
+              </select>
+            </div>
+            
+            <div class="form-group mb-3">
+              <label for="promptText" class="form-label">Prompt:</label>
+              <textarea id="promptText" class="form-control form-control-sm" rows="2" placeholder="Describe what to look for..."></textarea>
+            </div>
+            
+            <button id="analyzeImage" class="btn btn-success btn-sm w-100" disabled>Analyze Image</button>
+          </div>
+          
+          <div class="preview-container mt-3" id="previewContainer" style="display: none;">
+            <p class="preview-title">Preview:</p>
+            <img id="previewImage" class="preview-image" src="" alt="Preview">
+          </div>
+          
+          <div class="response-container mt-3" id="responseContainer" style="display: none;">
+            <p class="response-title">Response:</p>
+            <div id="responseText" class="response-text p-2 rounded"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Monitor Tab -->
+      <div class="tab-pane fade" id="monitor" role="tabpanel" aria-labelledby="monitor-tab">
+        <div class="tab-inner">
+          <div class="monitor-settings">
+            <div class="form-group mb-3">
+              <label class="form-label">Monitoring Schedule:</label>
+              <div class="input-group input-group-sm">
+                <span class="input-group-text">Every</span>
+                <input type="number" id="monitorInterval" class="form-control" min="10" value="30">
+                <span class="input-group-text">seconds</span>
+              </div>
+              <div class="form-text">Minimum: 10 seconds</div>
+            </div>
+            
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="enableNotifications">
+              <label class="form-check-label" for="enableNotifications">
+                Enable Notifications
+              </label>
+            </div>
+            
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="autoBackoff">
+              <label class="form-check-label" for="autoBackoff">
+                Auto-backoff on rate limits
+              </label>
+            </div>
+            
+            <div class="session-controls">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <span>Session:</span>
+                <span id="sessionStatus" class="badge bg-secondary">Inactive</span>
+              </div>
+              <div class="btn-group w-100">
+                <button id="startSession" class="btn btn-sm btn-success">Start Session</button>
+                <button id="pauseSession" class="btn btn-sm btn-warning" disabled>Pause</button>
+                <button id="stopSession" class="btn btn-sm btn-danger" disabled>Stop</button>
+              </div>
+            </div>
+          </div>
+          
+          <div class="monitoring-stats mt-3">
+            <h6>Current Session Stats:</h6>
+            <div class="stats-grid">
+              <div class="stat-item">
+                <div class="stat-label">Started:</div>
+                <div class="stat-value" id="sessionStartTime">--</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Duration:</div>
+                <div class="stat-value" id="sessionDuration">00:00:00</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Captures:</div>
+                <div class="stat-value" id="captureCount">0</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Last Capture:</div>
+                <div class="stat-value" id="lastCaptureTime">--</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">API Calls:</div>
+                <div class="stat-value" id="apiCallCount">0</div>
+              </div>
+              <div class="stat-item">
+                <div class="stat-label">Rate Limits:</div>
+                <div class="stat-value" id="rateLimitCount">0</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- History Tab -->
+      <div class="tab-pane fade" id="history" role="tabpanel" aria-labelledby="history-tab">
+        <div class="tab-inner">
+          <div class="history-controls mb-3">
+            <div class="d-flex justify-content-between">
+              <select id="sessionFilter" class="form-select form-select-sm w-50">
+                <option value="all">All Sessions</option>
+              </select>
+              
+              <div class="btn-group">
+                <button id="refreshHistory" class="btn btn-sm btn-outline-secondary">
+                  <i class="bi bi-arrow-clockwise"></i>
+                </button>
+                <button id="clearHistory" class="btn btn-sm btn-outline-danger">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <div class="table-responsive history-table-container">
+            <table class="table table-sm table-hover" id="historyTable">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Image</th>
+                  <th>Prompt</th>
+                  <th>Response</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="historyTableBody">
+                <!-- History items will be inserted here -->
+                <tr class="empty-state">
+                  <td colspan="5" class="text-center py-4">No history records found</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dev Tab -->
+      <div class="tab-pane fade" id="dev" role="tabpanel" aria-labelledby="dev-tab">
+        <div class="tab-inner">
+          <div class="accordion" id="devAccordion">
+            <!-- Debug Tools -->
+            <div class="accordion-item">
+              <h2 class="accordion-header">
+                <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#debugTools">
+                  Debug Tools
+                </button>
+              </h2>
+              <div id="debugTools" class="accordion-collapse collapse show">
+                <div class="accordion-body">
+                  <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" id="enableDebugMode">
+                    <label class="form-check-label" for="enableDebugMode">
+                      Enable Debug Mode
+                    </label>
+                  </div>
+                  
+                  <div class="form-check mb-3">
+                    <input class="form-check-input" type="checkbox" id="showPixelOverlay">
+                    <label class="form-check-label" for="showPixelOverlay">
+                      Show Pixel Grid Overlay
+                    </label>
+                  </div>
+                  
+                  <button id="testCapture" class="btn btn-sm btn-outline-primary mb-2">Test Capture</button>
+                  <button id="testAPIConnection" class="btn btn-sm btn-outline-primary mb-2">Test API Connection</button>
+                  <button id="viewLogs" class="btn btn-sm btn-outline-secondary">View Debug Logs</button>
+                </div>
+              </div>
+            </div>
+            
+            <!-- API Request Tester -->
+            <div class="accordion-item">
+              <h2 class="accordion-header">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#apiTester">
+                  API Request Tester
+                </button>
+              </h2>
+              <div id="apiTester" class="accordion-collapse collapse">
+                <div class="accordion-body">
+                  <div class="mb-3">
+                    <label for="apiEndpoint" class="form-label">Endpoint:</label>
+                    <input type="text" id="apiEndpoint" class="form-control form-control-sm" value="https://openrouter.ai/api/v1/chat/completions">
+                  </div>
+                  
+                  <div class="mb-3">
+                    <label for="apiKey" class="form-label">API Key:</label>
+                    <div class="input-group input-group-sm">
+                      <input type="password" id="apiKey" class="form-control form-control-sm">
+                      <button class="btn btn-outline-secondary" type="button" id="toggleApiKey">
+                        <i class="bi bi-eye"></i>
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div class="mb-3">
+                    <label for="apiPayload" class="form-label">Request Payload:</label>
+                    <textarea id="apiPayload" class="form-control form-control-sm code-area" rows="5"></textarea>
+                  </div>
+                  
+                  <button id="sendApiRequest" class="btn btn-sm btn-primary">Send Request</button>
+                  
+                  <div class="mt-3">
+                    <label for="apiResponse" class="form-label">Response:</label>
+                    <textarea id="apiResponse" class="form-control form-control-sm code-area" rows="5" readonly></textarea>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
+            <!-- Storage Manager -->
+            <div class="accordion-item">
+              <h2 class="accordion-header">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#storageManager">
+                  Storage Manager
+                </button>
+              </h2>
+              <div id="storageManager" class="accordion-collapse collapse">
+                <div class="accordion-body">
+                  <div class="d-flex justify-content-between mb-2">
+                    <span>Local Storage Usage:</span>
+                    <span id="storageUsage">0 KB / 5120 KB</span>
+                  </div>
+                  
+                  <div class="mb-3">
+                    <label for="storageType" class="form-label">Storage Type:</label>
+                    <select id="storageType" class="form-select form-select-sm">
+                      <option value="settings">Settings</option>
+                      <option value="sessions">Sessions</option>
+                      <option value="responses">Responses</option>
+                      <option value="images">Captured Images</option>
+                    </select>
+                  </div>
+                  
+                  <div class="mb-3">
+                    <label for="storageData" class="form-label">Data:</label>
+                    <textarea id="storageData" class="form-control form-control-sm code-area" rows="5" readonly></textarea>
+                  </div>
+                  
+                  <div class="d-flex justify-content-between">
+                    <button id="refreshStorage" class="btn btn-sm btn-outline-secondary">Refresh</button>
+                    <button id="exportStorage" class="btn btn-sm btn-outline-primary">Export</button>
+                    <button id="clearStorage" class="btn btn-sm btn-outline-danger">Clear</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Link to local Bootstrap JS -->
+  <script src="../vendor/bootstrap/bootstrap.min.js"></script>
+  <script src="../vendor/jquery.min.js"></script>
+  <script src="index.js"></script>
+</body>
+</html> 
