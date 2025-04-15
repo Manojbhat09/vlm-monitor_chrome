@@ -356,7 +356,19 @@ function handleSequentialMonitoringAlarm(alarm) {
 }
 
 // Remove any existing listeners and add the new alarm listener
-chrome.alarms.onAlarm.removeListener(handleMonitoringAlarm);
+try {
+  // Try to safely remove any existing alarm listeners
+  chrome.alarms.onAlarm.removeListener(handleSequentialMonitoringAlarm);
+  
+  // Safe way to try removing other potential listeners without causing errors
+  if (typeof handleMonitoringAlarm !== 'undefined') {
+    chrome.alarms.onAlarm.removeListener(handleMonitoringAlarm);
+  }
+} catch (err) {
+  log('Error cleaning up alarm listeners:', err);
+}
+
+// Add our new alarm listener
 chrome.alarms.onAlarm.addListener(handleSequentialMonitoringAlarm);
 
 // Update the stop function to clear both alarms
