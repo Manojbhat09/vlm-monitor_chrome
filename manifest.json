@@ -40,7 +40,9 @@
       "resources": [
         "/vendor/Jcrop.gif",
         "/content/pixel.png",
-        "/content/grid-overlay.png"
+        "/content/grid-overlay.png",
+        "/vendor/bootstrap-icons/fonts/bootstrap-icons.woff2",
+        "/vendor/bootstrap-icons/fonts/bootstrap-icons.woff"
       ]
     }
   ],

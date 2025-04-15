@@ -39,6 +39,9 @@ let pixelCounter = {
   total: 0
 };
 
+// Add a periodic state update timer
+let stateUpdateTimer = null;
+
 // Cost estimator per 1000 pixels (approximate)
 const COST_ESTIMATES = {
   'anthropic/claude-3-haiku': 0.000015,
@@ -93,6 +96,13 @@ function cacheElements() {
   domElements.statusIndicator = document.getElementById('statusIndicator');
   domElements.statusText = document.getElementById('statusText');
   
+  // API Key Section (new)
+  domElements.apiKeyStatus = document.getElementById('apiKeyStatus');
+  domElements.captureApiKey = document.getElementById('captureApiKey');
+  domElements.toggleCaptureApiKey = document.getElementById('toggleCaptureApiKey');
+  domElements.saveApiKey = document.getElementById('saveApiKey');
+  domElements.deleteApiKey = document.getElementById('deleteApiKey');
+
   // Capture tab
   domElements.captureViewport = document.getElementById('captureViewport');
   domElements.captureArea = document.getElementById('captureArea');
@@ -113,6 +123,8 @@ function cacheElements() {
   domElements.monitorInterval = document.getElementById('monitorInterval');
   domElements.enableNotifications = document.getElementById('enableNotifications');
   domElements.autoBackoff = document.getElementById('autoBackoff');
+  domElements.conversationMode = document.getElementById('conversationMode');
+  domElements.monitorPrompt = document.getElementById('monitorPrompt');
   domElements.sessionStatus = document.getElementById('sessionStatus');
   domElements.startSession = document.getElementById('startSession');
   domElements.pauseSession = document.getElementById('pauseSession');
@@ -148,11 +160,28 @@ function cacheElements() {
   domElements.refreshStorage = document.getElementById('refreshStorage');
   domElements.exportStorage = document.getElementById('exportStorage');
   domElements.clearStorage = document.getElementById('clearStorage');
+  
+  // Add next capture countdown timer to the domElements
+  domElements.nextCaptureTimer = document.getElementById('nextCaptureTimer');
+  
+  // Add the selectedAreaInfo element
+  domElements.selectedAreaInfo = document.getElementById('selectedAreaInfo');
 }
 
 // Initialize UI based on settings
 function initUI() {
-  // Set status
+  // Set up tabs
+  document.querySelectorAll('.tab-button').forEach(button => {
+    button.addEventListener('click', () => {
+      const tabId = button.dataset.tabId;
+      switchTab(tabId);
+    });
+  });
+  
+  // Load any saved settings
+  loadSettings();
+  
+  // Initialize UI elements
   updateStatus(STATUS.IDLE, 'Ready');
   
   // Update storage usage
@@ -163,34 +192,104 @@ function initUI() {
   
   // Load history data
   loadHistoryData();
+  
+  // Check for any ongoing session
+  checkOngoingSession();
+  
+  // Request current state from background script
+  requestCurrentState();
+}
+
+// Check for any cached messages from the background script
+function checkCachedMessages() {
+  chrome.runtime.sendMessage({ action: 'getCachedMessages' }, (response) => {
+    if (chrome.runtime.lastError) {
+      log('Error checking cached messages:', chrome.runtime.lastError);
+      return;
+    }
+    
+    if (response && response.success && response.cache) {
+      log('Received cached messages from background script');
+      
+      // Process each cached message type
+      Object.keys(response.cache).forEach(actionType => {
+        const cachedItem = response.cache[actionType];
+        
+        // Skip if the message is too old (> 5 minutes)
+        if (Date.now() - cachedItem.timestamp > 300000) {
+          return;
+        }
+        
+        const message = cachedItem.message;
+        log('Processing cached message:', message);
+        
+        // Handle different message types
+        switch (message.action) {
+          case 'updateStatus':
+            updateStatus(message.status, message.message);
+            break;
+          case 'areaSelected':
+            handleAreaSelected(message.data);
+            break;
+          case 'captureComplete':
+            handleCaptureComplete(message.data, message.analyze);
+            break;
+          case 'analyzeComplete':
+            handleAnalyzeComplete(message.data);
+            break;
+          case 'sessionUpdate':
+            if (message.session) {
+              currentSession = message.session;
+              updateSessionUI();
+            }
+            break;
+          case 'rateLimitHit':
+            handleRateLimit(message.data);
+            break;
+          case 'historyUpdated':
+            loadHistoryData();
+            break;
+          case 'sessionListUpdated':
+            loadSessionsIntoFilter();
+            break;
+          // Add more cases as needed
+        }
+      });
+    }
+  });
 }
 
 // Request current state from background script
 function requestCurrentState() {
-  log('Requesting current state from background');
   chrome.runtime.sendMessage({ action: 'getCurrentState' }, (response) => {
     if (chrome.runtime.lastError) {
-      log('Error requesting state:', chrome.runtime.lastError);
-      updateStatus(STATUS.ERROR, 'Error connecting to background');
+      log('Error requesting current state:', chrome.runtime.lastError);
       return;
     }
-    log('Received current state:', response);
+
     if (response && response.state) {
-      // Apply state to UI
-      applyState(response.state);
-    } else {
-      log('No state received or invalid response', response);
+      log('Received current state from background script');
       
-      // Force refresh of captured image from background state after 500ms
-      // This helps in cases where the popup re-opens after selection
-      setTimeout(() => {
-        chrome.runtime.sendMessage({ action: 'getCurrentState' }, (refreshResponse) => {
-          if (refreshResponse && refreshResponse.state && refreshResponse.state.capturedImage) {
-            log('Received refreshed state with captured image');
-            handleCaptureComplete(refreshResponse.state.capturedImage, false);
+      // Important: Only update local session state if we don't have one
+      // or if the background session is newer/different
+      if (response.state.currentSession) {
+        if (!currentSession || 
+            currentSession.id !== response.state.currentSession.id ||
+            currentSession.status !== response.state.currentSession.status) {
+          // Update with the background's session
+          currentSession = response.state.currentSession;
+          updateSessionUI();
+          
+          // If session is active, ensure timer is running
+          if (currentSession.status === 'active' && !sessionTimer) {
+            startSessionTimer();
+          } else if (currentSession.status !== 'active' && sessionTimer) {
+            stopSessionTimer();
           }
-        });
-      }, 500);
+        }
+      }
+      
+      applyState(response.state);
     }
   });
 }
@@ -234,18 +333,30 @@ function loadSettings() {
   chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
     const settings = result[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
     
-    // Apply settings to UI
-    if (domElements.vlmModel) domElements.vlmModel.value = settings.vlmModel;
-    if (domElements.monitorInterval) domElements.monitorInterval.value = settings.monitorInterval;
-    if (domElements.enableNotifications) domElements.enableNotifications.checked = settings.enableNotifications;
-    if (domElements.autoBackoff) domElements.autoBackoff.checked = settings.autoBackoff;
-    if (domElements.enableDebugMode) domElements.enableDebugMode.checked = settings.debugMode;
-    if (domElements.showPixelOverlay) domElements.showPixelOverlay.checked = settings.showPixelOverlay;
-    if (domElements.apiKey) domElements.apiKey.value = settings.apiKey || '';
+    // Update VLM model dropdown
+    if (domElements.vlmModel) domElements.vlmModel.value = settings.vlmModel || DEFAULT_SETTINGS.vlmModel;
     
-    // Apply developer settings
-    if (settings.debugMode) {
-      document.body.classList.add('debug-mode');
+    // Update monitoring settings
+    if (domElements.monitorInterval) domElements.monitorInterval.value = settings.monitorInterval || DEFAULT_SETTINGS.monitorInterval;
+    if (domElements.enableNotifications) domElements.enableNotifications.checked = settings.enableNotifications !== false;
+    if (domElements.autoBackoff) domElements.autoBackoff.checked = settings.autoBackoff !== false;
+    if (domElements.conversationMode) domElements.conversationMode.checked = settings.conversationMode === true;
+    if (domElements.monitorPrompt) domElements.monitorPrompt.value = settings.monitorPrompt || '';
+    
+    // Update debug settings
+    if (domElements.enableDebugMode) domElements.enableDebugMode.checked = settings.debugMode === true;
+    if (domElements.showPixelOverlay) domElements.showPixelOverlay.checked = settings.showPixelOverlay === true;
+    
+    // Update API key fields
+    if (domElements.apiKey) domElements.apiKey.value = settings.apiKey || '';
+    if (domElements.captureApiKey) {
+      domElements.captureApiKey.value = settings.apiKey || '';
+      updateApiKeyUI(settings.apiKey || '');
+    }
+    
+    // Update prompt from storage
+    if (domElements.promptText) {
+      domElements.promptText.value = settings.lastPrompt || '';
     }
   });
 }
@@ -265,9 +376,12 @@ function saveSettings() {
     monitorInterval: parseInt(domElements.monitorInterval.value, 10),
     enableNotifications: domElements.enableNotifications.checked,
     autoBackoff: domElements.autoBackoff.checked,
+    conversationMode: domElements.conversationMode?.checked || false,
+    monitorPrompt: domElements.monitorPrompt?.value || '',
     debugMode: domElements.enableDebugMode.checked,
     showPixelOverlay: domElements.showPixelOverlay.checked,
-    apiKey: apiKey
+    apiKey: apiKey,
+    lastPrompt: domElements.promptText.value || ''
   };
   
   chrome.storage.sync.set({ [STORAGE_KEYS.SETTINGS]: settings }, () => {
@@ -305,6 +419,56 @@ function updateStatus(status, message) {
 
 // Attach event listeners
 function attachEventListeners() {
+  // API Key Section listeners (new)
+  domElements.toggleCaptureApiKey.addEventListener('click', () => {
+    const apiKeyField = domElements.captureApiKey;
+    apiKeyField.type = apiKeyField.type === 'password' ? 'text' : 'password';
+    domElements.toggleCaptureApiKey.innerHTML = apiKeyField.type === 'password' ? 
+      '<i class="bi bi-eye"></i>' : '<i class="bi bi-eye-slash"></i>';
+  });
+
+  domElements.saveApiKey.addEventListener('click', () => {
+    const apiKey = domElements.captureApiKey.value.trim();
+    if (!apiKey) {
+      updateStatus(STATUS.WARNING, 'API key cannot be empty');
+      return;
+    }
+    
+    // Save to settings
+    chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
+      const settings = result[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
+      settings.apiKey = apiKey;
+      chrome.storage.sync.set({ [STORAGE_KEYS.SETTINGS]: settings }, () => {
+        updateApiKeyUI(apiKey);
+        updateStatus(STATUS.ACTIVE, 'API key saved');
+        
+        // Also update the API key in the dev tab
+        if (domElements.apiKey) {
+          domElements.apiKey.value = apiKey;
+        }
+      });
+    });
+  });
+
+  domElements.deleteApiKey.addEventListener('click', () => {
+    if (confirm('Are you sure you want to delete your API key?')) {
+      chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
+        const settings = result[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
+        settings.apiKey = '';
+        chrome.storage.sync.set({ [STORAGE_KEYS.SETTINGS]: settings }, () => {
+          domElements.captureApiKey.value = '';
+          updateApiKeyUI('');
+          updateStatus(STATUS.WARNING, 'API key deleted');
+          
+          // Also update the API key in the dev tab
+          if (domElements.apiKey) {
+            domElements.apiKey.value = '';
+          }
+        });
+      });
+    }
+  });
+
   // Capture tab
   domElements.captureViewport.addEventListener('click', handleCaptureViewport);
   domElements.captureArea.addEventListener('click', handleCaptureArea);
@@ -322,6 +486,8 @@ function attachEventListeners() {
   domElements.monitorInterval.addEventListener('change', saveSettings);
   domElements.enableNotifications.addEventListener('change', saveSettings);
   domElements.autoBackoff.addEventListener('change', saveSettings);
+  domElements.conversationMode.addEventListener('change', saveSettings);
+  domElements.monitorPrompt.addEventListener('input', saveSettings);
   domElements.startSession.addEventListener('click', handleStartSession);
   domElements.pauseSession.addEventListener('click', handlePauseSession);
   domElements.stopSession.addEventListener('click', handleStopSession);
@@ -350,50 +516,132 @@ function attachEventListeners() {
   
   // Save settings when API key changes
   domElements.apiKey.addEventListener('change', saveSettings);
+  
+  // Add event listener for monitoring interval change
+  domElements.monitorInterval.addEventListener('change', () => {
+    const interval = parseInt(domElements.monitorInterval.value, 10);
+    
+    // Enforce minimum interval
+    if (interval < 10) {
+      domElements.monitorInterval.value = '10';
+    }
+    
+    // If we have an active session, update its settings
+    if (currentSession && currentSession.status === 'active') {
+      log('Updating monitor interval to:', interval);
+      
+      chrome.runtime.sendMessage({
+        action: 'updateSessionSettings',
+        monitorInterval: Math.max(10, interval)
+      });
+    }
+    
+    // Save the interval to settings
+    saveSettings();
+  });
+  
+  // Add event listener for conversation mode toggle
+  if (domElements.conversationMode) {
+    domElements.conversationMode.addEventListener('change', () => {
+      const enabled = domElements.conversationMode.checked;
+      
+      // If we have an active session, update its settings
+      if (currentSession && currentSession.status === 'active') {
+        log('Updating conversation mode to:', enabled);
+        
+        chrome.runtime.sendMessage({
+          action: 'updateSessionSettings',
+          conversationMode: enabled
+        });
+      }
+      
+      // Save the setting
+      saveSettings();
+    });
+  }
+  
+  // Add event listener for monitoring prompt change
+  domElements.monitorPrompt.addEventListener('change', () => {
+    const prompt = domElements.monitorPrompt.value.trim();
+    
+    // If we have an active session, update its settings
+    if (currentSession && currentSession.status === 'active') {
+      log('Updating monitor prompt');
+      
+      chrome.runtime.sendMessage({
+        action: 'updateSessionSettings',
+        monitorPrompt: prompt
+      });
+    }
+  });
 }
 
-// Handle messages from background or content scripts
+// Handle messages from background
 function handleMessages(message, sender, sendResponse) {
-  log('Popup received message:', message);
+  log('Popup received message:', message.action);
+  
   try {
-      if (message.action === 'areaSelected') {
-        handleAreaSelected(message.data);
-        sendResponse({ success: true });
-      } else if (message.action === 'captureComplete') {
-        // Don't re-analyze if it's just restoring state
-        handleCaptureComplete(message.data, message.analyze !== false);
-        sendResponse({ success: true });
-      } else if (message.action === 'analyzeComplete') {
-        handleAnalyzeComplete(message.data);
-        sendResponse({ success: true });
-      } else if (message.action === 'updateStatus') {
-        updateStatus(message.status, message.message);
-        sendResponse({ success: true });
-      } else if (message.action === 'rateLimitHit') {
-        handleRateLimit(message.data);
-        sendResponse({ success: true });
-      } else if (message.action === 'sessionUpdate') {
-        currentSession = message.session;
-        updateSessionUI();
-        if (currentSession?.status === 'active' && !sessionTimer) {
-            startSessionTimer();
-        } else if (currentSession?.status !== 'active' && sessionTimer) {
-            stopSessionTimer();
+    // Update the UI based on which message was received
+    switch (message.action) {
+      case 'updateStatus':
+        if (message.status && message.message) {
+          updateStatus(message.status, message.message);
         }
         sendResponse({ success: true });
-      } else if (message.action === 'debugLog') {
+        break;
+        
+      case 'areaSelected':
+        handleAreaSelected(message.data);
+        sendResponse({ success: true });
+        break;
+        
+      case 'captureComplete':
+        handleCaptureComplete(message.data, message.analyze !== false);
+        sendResponse({ success: true });
+        break;
+        
+      case 'analyzeComplete':
+        handleAnalyzeComplete(message.data);
+        sendResponse({ success: true });
+        break;
+        
+      case 'sessionUpdate':
+        log('Session update received');
+        handleSessionUpdate(message.session);
+        sendResponse({ success: true });
+        break;
+        
+      case 'rateLimitHit':
+        handleRateLimit(message.data);
+        sendResponse({ success: true });
+        break;
+        
+      case 'historyUpdated':
+        loadHistoryData();
+        sendResponse({ success: true });
+        break;
+        
+      case 'sessionListUpdated':
+        loadSessionsIntoFilter();
+        sendResponse({ success: true });
+        break;
+        
+      case 'debugLog':
         if (domElements.enableDebugMode?.checked) {
           console.log('[Debug]', message.data);
         }
         sendResponse({ success: true });
-      } else {
+        break;
+        
+      default:
         sendResponse({ success: false, error: 'Unknown action in popup' });
-      }
+        break;
+    }
   } catch (error) {
-      log('Error handling message in popup:', error, message);
-      sendResponse({ success: false, error: error.message });
+    log('Error handling message in popup:', error, message);
+    sendResponse({ success: false, error: error.message });
   }
-
+  
   return true; // Keep the message channel open for async response
 }
 
@@ -451,30 +699,26 @@ function handleCaptureArea() {
 
 // Handle area selected from content script
 function handleAreaSelected(data) {
+  log('Area selected:', data);
+  
+  // Save the selected area to the global variable
   selectedArea = data;
-  pixelCounter = {
-    width: data.width,
-    height: data.height,
-    total: data.width * data.height
-  };
+  
+  // If we have an active session, update it with the selected area
+  if (currentSession && currentSession.status === 'active') {
+    log('Updating selectedArea in active session');
+    currentSession.selectedArea = data;
+    saveSession(currentSession);
+  }
   
   // Update UI
-  domElements.selectionInfo.style.display = 'block';
-  domElements.dimensionsText.textContent = `${data.width} x ${data.height} px`;
-  domElements.pixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
+  updateStatus(STATUS.ACTIVE, 'Area selected');
   
-  // Calculate cost estimate
-  const costPerPixel = COST_ESTIMATES[domElements.vlmModel.value] || 0.00001;
-  const estimatedCost = (pixelCounter.total / 1000) * costPerPixel;
-  domElements.costText.textContent = `$${estimatedCost.toFixed(6)}`;
-  
-  // Enable analyze button
-  domElements.analyzeImage.disabled = false;
-  
-  updateStatus(STATUS.ACTIVE, 'Area selected. Preview will appear after capture completes.');
-  
-  log('Area selection recorded in popup', data);
-  // Note: The captureViewportArea is now called automatically in the background
+  // Show selected area dimensions in UI if available
+  if (domElements.selectedAreaInfo) {
+    domElements.selectedAreaInfo.style.display = 'block';
+    domElements.selectedAreaInfo.textContent = `Selected Area: ${data.w}×${data.h} at (${data.x},${data.y})`;
+  }
 }
 
 // Handle analyze image button click
@@ -487,6 +731,30 @@ function handleAnalyzeImage() {
     dataUrlLength: imageToAnalyze?.dataUrl?.length || 0
   });
 
+  // Check if API key is set
+  chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
+    const settings = result[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
+    const apiKey = settings.apiKey?.trim();
+    
+    if (!apiKey) {
+      updateStatus(STATUS.WARNING, 'API key not set. Please enter your API key.');
+      
+      // Highlight the API key section
+      document.querySelector('.api-key-section').classList.add('border-warning');
+      setTimeout(() => {
+        document.querySelector('.api-key-section').classList.remove('border-warning');
+      }, 3000);
+      
+      return;
+    }
+    
+    // Continue with image validation and analysis
+    continueImageAnalysis(imageToAnalyze);
+  });
+}
+
+// Handle the actual image analysis after API key check
+function continueImageAnalysis(imageToAnalyze) {
   if (!imageToAnalyze?.dataUrl) {
     updateStatus(STATUS.WARNING, 'No captured image available');
     // Try to get the image from background state as a last resort
@@ -520,6 +788,66 @@ function handleAnalyzeImage() {
   log('Sending image for analysis', { promptLength: prompt.length });
   // We have a captured image, analyze it directly
   sendImageForAnalysis(imageToAnalyze, prompt);
+}
+
+// Send image for analysis to the VLM API (sends message to background)
+function sendImageForAnalysis(imageData, prompt) {
+  updateStatus(STATUS.PROCESSING, 'Sending to API...');
+
+  // Prepare API request
+  const settings = saveSettings(); // Ensure latest settings are used
+  
+  // Check if API key is set
+  const apiKey = settings.apiKey?.trim();
+  if (!apiKey) {
+    updateStatus(STATUS.WARNING, 'API key not set. Please enter your API key.');
+    
+    // Highlight the API key section
+    document.querySelector('.api-key-section').classList.add('border-warning');
+    setTimeout(() => {
+      document.querySelector('.api-key-section').classList.remove('border-warning');
+    }, 3000);
+    
+    // Re-enable analyze button
+    if (domElements.analyzeImage) {
+      domElements.analyzeImage.disabled = false;
+    }
+    
+    return;
+  }
+
+  const modelId = settings.vlmModel;
+
+  // Estimate pixel count from image data if not available
+  let imageSize = pixelCounter.total > 0 ? pixelCounter : { width: 0, height: 0, total: 0 };
+
+  // Construct the payload (simplified, background handles details)
+  let payload = {
+      model: modelId,
+      prompt: prompt,
+      imageDataUrl: imageData.dataUrl
+  };
+
+  // Send to background script to handle the API request construction and call
+  chrome.runtime.sendMessage({
+    action: 'analyzeImage',
+    payload: payload,
+    apiKey: apiKey,
+    metadata: {
+      prompt: prompt,
+      imageSize: imageSize, // Send estimated size
+      timestamp: new Date().toISOString(),
+      sessionId: currentSession?.id || null
+    }
+  }, (response) => {
+    if (response && response.success) {
+      log('API analysis request sent successfully');
+    } else {
+      updateStatus(STATUS.ERROR, response?.error || 'API request failed');
+      domElements.analyzeImage.disabled = false;
+      log('API analysis request failed', response?.error);
+    }
+  });
 }
 
 // Handle capture complete from content or background script
@@ -592,76 +920,56 @@ function handleCaptureComplete(data, shouldAnalyze = true) {
   }
 }
 
-// Send image for analysis to the VLM API (sends message to background)
-function sendImageForAnalysis(imageData, prompt) {
-  updateStatus(STATUS.PROCESSING, 'Sending to API...');
-
-  // Prepare API request
-  const settings = saveSettings(); // Ensure latest settings are used
-  
-  // Ensure there's always an API key - if empty, fall back to default
-  let apiKey = settings.apiKey.trim();
-  if (!apiKey) {
-    apiKey = DEFAULT_SETTINGS.apiKey;
-    log('Using default API key for request');
-  }
-
-  const modelId = settings.vlmModel;
-
-  // Estimate pixel count from image data if not available
-  let imageSize = pixelCounter.total > 0 ? pixelCounter : { width: 0, height: 0, total: 0 };
-
-  // Construct the payload (simplified, background handles details)
-  let payload = {
-      model: modelId,
-      prompt: prompt,
-      imageDataUrl: imageData.dataUrl
-  };
-
-  // Send to background script to handle the API request construction and call
-  chrome.runtime.sendMessage({
-    action: 'analyzeImage',
-    payload: payload,
-    apiKey: apiKey,
-    metadata: {
-      prompt: prompt,
-      imageSize: imageSize, // Send estimated size
-      timestamp: new Date().toISOString(),
-      sessionId: currentSession?.id || null
-    }
-  }, (response) => {
-    if (response && response.success) {
-      log('API analysis request sent successfully');
-    } else {
-      updateStatus(STATUS.ERROR, response?.error || 'API request failed');
-      domElements.analyzeImage.disabled = false;
-      log('API analysis request failed', response?.error);
-    }
-  });
-}
-
 // Handle analyze complete from background script
 function handleAnalyzeComplete(data) {
-  // Enable analyze button
-  if (domElements.analyzeImage) domElements.analyzeImage.disabled = false;
-
-  if (data.error) {
-    updateStatus(STATUS.ERROR, data.error.message || 'Analysis failed');
-    log('Analysis failed', data.error);
+  let response = data.response;
+  let error = data.error;
+  
+  log('Analyze complete received', { response, error });
+  
+  if (error) {
+    updateStatus(STATUS.ERROR, error.message || 'Analysis failed');
     return;
   }
-
-  updateStatus(STATUS.ACTIVE, 'Analysis complete');
-
-  // Get the response object from the data
-  const response = data.response;
-  if (!response) {
-    log('No response data received');
-    return;
+  
+  // Save response and show in UI
+  if (response) {
+    saveResponse(response);
+    showResponseInUI(response);
+    
+    // Add to conversation history if in conversation mode
+    if (currentSession && currentSession.settings?.conversationMode) {
+      // Add to conversation history
+      if (!currentSession.conversationHistory) {
+        currentSession.conversationHistory = [];
+      }
+      
+      // Push prompt and response to history
+      currentSession.conversationHistory.push(`User: ${response.prompt}`);
+      currentSession.conversationHistory.push(`AI: ${response.responseText}`);
+      
+      // Limit history to last 10 exchanges
+      if (currentSession.conversationHistory.length > 20) {
+        currentSession.conversationHistory = currentSession.conversationHistory.slice(currentSession.conversationHistory.length - 20);
+      }
+      
+      // Save updated session
+      saveSession(currentSession);
+    }
+    
+    // IMPORTANT: Set the status to active rather than idle if we're in monitor mode
+    if (currentSession && currentSession.status === 'active') {
+      updateStatus(STATUS.ACTIVE, 'Analysis complete - monitoring continuing');
+      
+      // Make sure we don't lose active state in the UI
+      updateSessionUI();
+      
+      // Start the countdown timer for next capture
+      startCaptureCountdown();
+    } else {
+      updateStatus(STATUS.IDLE, 'Analysis complete');
+    }
   }
-
-  // Show response data in UI
-  showResponseInUI(response);
 }
 
 // Helper function to inject content script if not already loaded
@@ -728,24 +1036,49 @@ function formatDateTime(date) {
 
 // Check for any ongoing monitoring session
 function checkOngoingSession() {
-  chrome.storage.local.get([STORAGE_KEYS.SESSIONS], (result) => {
-    const sessions = result[STORAGE_KEYS.SESSIONS] || [];
+  log('Checking for ongoing session...');
+  
+  chrome.runtime.sendMessage({ action: 'getCurrentState' }, response => {
+    if (chrome.runtime.lastError || !response?.success) {
+      log('Error checking for ongoing session:', chrome.runtime.lastError || response?.error);
+      return;
+    }
     
-    // Look for any active session
-    const activeSession = sessions.find(session => session.status === 'active');
+    const state = response.state;
     
-    if (activeSession) {
-      // Resume active session
-      currentSession = activeSession;
+    if (state.currentSession) {
+      log('Ongoing session found:', state.currentSession.id);
+      
+      // Store the session data
+      currentSession = state.currentSession;
+      
+      // Restore the prompt from the session if available
+      if (currentSession.settings?.monitorPrompt) {
+        domElements.monitorPrompt.value = currentSession.settings.monitorPrompt;
+      }
+      
+      // Restore conversation mode setting if available
+      if (domElements.conversationMode && currentSession.settings?.conversationMode !== undefined) {
+        domElements.conversationMode.checked = currentSession.settings.conversationMode;
+      }
       
       // Update UI
       updateSessionUI();
       
-      // Resume session timer
-      startSessionTimer();
-      
-      // Check if we need to recreate the alarm
-      checkMonitoringAlarm();
+      // Start session timer if active
+      if (currentSession.status === 'active') {
+        startSessionTimer();
+        
+        // Start countdown for next capture if scheduled
+        if (currentSession.nextScheduledCapture) {
+          const nextCaptureTime = new Date(currentSession.nextScheduledCapture).getTime();
+          startCaptureCountdown(nextCaptureTime);
+        }
+      }
+    } else {
+      log('No ongoing session found');
+      currentSession = null;
+      updateSessionUI();
     }
   });
 }
@@ -753,156 +1086,244 @@ function checkOngoingSession() {
 // Update session UI based on current session
 function updateSessionUI() {
   if (!currentSession) {
+    // No active session
     domElements.sessionStatus.textContent = 'Inactive';
     domElements.sessionStatus.className = 'badge bg-secondary';
+    
     domElements.startSession.disabled = false;
     domElements.pauseSession.disabled = true;
     domElements.stopSession.disabled = true;
+    
     domElements.sessionStartTime.textContent = '--';
     domElements.sessionDuration.textContent = '00:00:00';
     domElements.captureCount.textContent = '0';
     domElements.lastCaptureTime.textContent = '--';
+    domElements.nextCaptureTimer.textContent = '--';
     domElements.apiCallCount.textContent = '0';
     domElements.rateLimitCount.textContent = '0';
+    
     return;
   }
   
-  // Set session status badge
-  domElements.sessionStatus.textContent = currentSession.status === 'active' ? 'Active' : 
-    currentSession.status === 'paused' ? 'Paused' : 'Completed';
-  
-  domElements.sessionStatus.className = currentSession.status === 'active' ? 'badge bg-success' : 
-    currentSession.status === 'paused' ? 'badge bg-warning' : 'badge bg-danger';
-  
-  // Set button states
-  domElements.startSession.disabled = currentSession.status === 'active';
-  domElements.pauseSession.disabled = currentSession.status !== 'active';
-  domElements.stopSession.disabled = currentSession.status === 'completed';
+  // Update status based on session state
+  if (currentSession.status === 'active') {
+    domElements.sessionStatus.textContent = 'Active';
+    domElements.sessionStatus.className = 'badge bg-success';
+    
+    domElements.startSession.disabled = true;
+    domElements.pauseSession.disabled = false;
+    domElements.stopSession.disabled = false;
+  } else if (currentSession.status === 'paused') {
+    domElements.sessionStatus.textContent = 'Paused';
+    domElements.sessionStatus.className = 'badge bg-warning text-dark';
+    
+    domElements.startSession.disabled = true;
+    domElements.pauseSession.disabled = true;
+    domElements.stopSession.disabled = false;
+  } else {
+    domElements.sessionStatus.textContent = 'Completed';
+    domElements.sessionStatus.className = 'badge bg-info text-dark';
+    
+    domElements.startSession.disabled = false;
+    domElements.pauseSession.disabled = true;
+    domElements.stopSession.disabled = true;
+  }
   
   // Update session stats
-  domElements.sessionStartTime.textContent = formatTime(new Date(currentSession.startTime));
-  domElements.captureCount.textContent = currentSession.captureCount.toString();
-  domElements.apiCallCount.textContent = currentSession.apiCallCount.toString();
-  domElements.rateLimitCount.textContent = currentSession.rateLimitCount.toString();
+  domElements.sessionStartTime.textContent = formatDateTime(new Date(currentSession.startTime));
+  domElements.captureCount.textContent = currentSession.captureCount || '0';
+  domElements.apiCallCount.textContent = currentSession.apiCallCount || '0';
+  domElements.rateLimitCount.textContent = currentSession.rateLimitCount || '0';
   
+  // Update last capture time if available
   if (currentSession.lastCaptureTime) {
     domElements.lastCaptureTime.textContent = formatTime(new Date(currentSession.lastCaptureTime));
   } else {
     domElements.lastCaptureTime.textContent = '--';
   }
+  
+  // If session is active and has a next scheduled capture, show countdown
+  if (currentSession.status === 'active' && currentSession.nextScheduledCapture) {
+    const nextCaptureTime = new Date(currentSession.nextScheduledCapture).getTime();
+    startCaptureCountdown(nextCaptureTime);
+  } else {
+    // No next capture, show placeholder
+    if (window.captureCountdownTimer) {
+      clearInterval(window.captureCountdownTimer);
+      window.captureCountdownTimer = null;
+    }
+    domElements.nextCaptureTimer.textContent = '--';
+  }
+  
+  // Update selected area info if present
+  if (currentSession.selectedArea) {
+    const area = currentSession.selectedArea;
+    domElements.selectedAreaInfo.textContent = `Selected Area: ${area.width}×${area.height} at (${area.left},${area.top})`;
+    domElements.selectedAreaInfo.style.display = 'block';
+  } else {
+    domElements.selectedAreaInfo.textContent = 'Selected Area: Full viewport';
+    domElements.selectedAreaInfo.style.display = 'block';
+  }
 }
 
 // Start a new monitoring session
 function handleStartSession() {
-  // If there's a paused session, resume it
-  if (currentSession && currentSession.status === 'paused') {
-    currentSession.status = 'active';
-    currentSession.resumeTime = new Date().toISOString();
+  log('Starting new monitoring session');
+  const prompt = domElements.monitorPrompt.value.trim();
+  
+  if (!prompt) {
+    alert('Please enter a monitoring prompt before starting the session.');
+    return;
+  }
+  
+  // Get conversation mode setting
+  const conversationMode = domElements.conversationMode.checked;
+  
+  // Disable buttons during processing
+  domElements.startSession.disabled = true;
+  domElements.pauseSession.disabled = true;
+  domElements.stopSession.disabled = true;
+  
+  // Update status
+  updateStatus('processing', 'Starting session...');
+  
+  // First check if we have a selected area from the state
+  chrome.runtime.sendMessage({
+    action: 'startSession',
+    selectedArea: selectedArea,
+    prompt: prompt,
+    conversationMode: conversationMode
+  }, response => {
+    if (chrome.runtime.lastError) {
+      log('Error starting session:', chrome.runtime.lastError);
+      domElements.startSession.disabled = false;
+      updateStatus('error', 'Failed to start session');
+      return;
+    }
     
-    // Save session
-    saveSession(currentSession);
+    if (!response || !response.success) {
+      log('Failed to start session:', response?.error || 'Unknown error');
+      domElements.startSession.disabled = false;
+      updateStatus('error', 'Failed to start session');
+      return;
+    }
+    
+    log('Session started successfully');
+    
+    // Store the session data
+    currentSession = response.session;
     
     // Update UI
     updateSessionUI();
     
-    // Resume session timer
+    // Reset session stats
+    domElements.sessionStartTime.textContent = formatDateTime(new Date(currentSession.startTime));
+    domElements.sessionDuration.textContent = '00:00:00';
+    domElements.captureCount.textContent = '0';
+    domElements.lastCaptureTime.textContent = '--';
+    domElements.nextCaptureTimer.textContent = 'Starting...';
+    domElements.apiCallCount.textContent = '0';
+    domElements.rateLimitCount.textContent = '0';
+    
+    // Start session timer
     startSessionTimer();
-    
-    // Start monitoring alarm
-    startMonitoringAlarm();
-    
-    updateStatus(STATUS.ACTIVE, 'Session resumed');
-    return;
-  }
-  
-  // Create a new session
-  currentSession = {
-    id: generateId(),
-    status: 'active',
-    startTime: new Date().toISOString(),
-    endTime: null,
-    duration: 0,
-    captureCount: 0,
-    apiCallCount: 0,
-    rateLimitCount: 0,
-    lastCaptureTime: null,
-    settings: saveSettings()
-  };
-  
-  // Save session
-  saveSession(currentSession);
-  
-  // Update UI
-  updateSessionUI();
-  
-  // Start session timer
-  startSessionTimer();
-  
-  // Start monitoring alarm
-  startMonitoringAlarm();
-  
-  updateStatus(STATUS.ACTIVE, 'Session started');
-  
-  // Add session to filter
-  addSessionToFilter(currentSession);
+  });
 }
 
 // Pause current monitoring session
 function handlePauseSession() {
   if (!currentSession || currentSession.status !== 'active') {
+    log('No active session to pause');
     return;
   }
   
-  // Pause session
-  currentSession.status = 'paused';
-  currentSession.pauseTime = new Date().toISOString();
+  log('Pausing session');
   
-  // Save session
-  saveSession(currentSession);
+  // Disable buttons during processing
+  domElements.startSession.disabled = true;
+  domElements.pauseSession.disabled = true;
+  domElements.stopSession.disabled = true;
   
-  // Update UI
-  updateSessionUI();
+  // Update status
+  updateStatus('processing', 'Pausing session...');
   
-  // Stop session timer
-  stopSessionTimer();
-  
-  // Stop monitoring alarm
-  stopMonitoringAlarm();
-  
-  updateStatus(STATUS.IDLE, 'Session paused');
+  chrome.runtime.sendMessage({
+    action: 'pauseSession'
+  }, response => {
+    if (chrome.runtime.lastError || !response?.success) {
+      log('Error pausing session:', chrome.runtime.lastError || response?.error);
+      updateSessionUI(); // Reset UI
+      updateStatus('error', 'Failed to pause session');
+      return;
+    }
+    
+    log('Session paused successfully');
+    
+    // Update session data
+    currentSession = response.session;
+    
+    // Update UI
+    updateSessionUI();
+    
+    // Stop the session timer
+    stopSessionTimer();
+    
+    // Clear countdown timer
+    if (window.captureCountdownTimer) {
+      clearInterval(window.captureCountdownTimer);
+      window.captureCountdownTimer = null;
+      domElements.nextCaptureTimer.textContent = '--';
+    }
+    
+    updateStatus('idle', 'Session paused');
+  });
 }
 
 // Stop current monitoring session
 function handleStopSession() {
-  if (!currentSession || currentSession.status === 'completed') {
+  if (!currentSession) {
+    log('No session to stop');
     return;
   }
   
-  // Complete session
-  currentSession.status = 'completed';
-  currentSession.endTime = new Date().toISOString();
+  log('Stopping session');
   
-  // Calculate total duration
-  if (sessionTimer) {
-    currentSession.duration = getSessionDuration();
-  }
+  // Disable buttons during processing
+  domElements.startSession.disabled = true;
+  domElements.pauseSession.disabled = true;
+  domElements.stopSession.disabled = true;
   
-  // Save session
-  saveSession(currentSession);
+  // Update status
+  updateStatus('processing', 'Stopping session...');
   
-  // Update UI
-  updateSessionUI();
-  
-  // Stop session timer
-  stopSessionTimer();
-  
-  // Stop monitoring alarm
-  stopMonitoringAlarm();
-  
-  updateStatus(STATUS.IDLE, 'Session completed');
-  
-  // Clear current session
-  currentSession = null;
+  chrome.runtime.sendMessage({
+    action: 'stopSession'
+  }, response => {
+    if (chrome.runtime.lastError || !response?.success) {
+      log('Error stopping session:', chrome.runtime.lastError || response?.error);
+      updateSessionUI(); // Reset UI
+      updateStatus('error', 'Failed to stop session');
+      return;
+    }
+    
+    log('Session stopped successfully');
+    
+    // Clear session data
+    currentSession = null;
+    
+    // Update UI for no session
+    updateSessionUI();
+    
+    // Stop timers
+    stopSessionTimer();
+    if (window.captureCountdownTimer) {
+      clearInterval(window.captureCountdownTimer);
+      window.captureCountdownTimer = null;
+      domElements.nextCaptureTimer.textContent = '--';
+    }
+    
+    updateStatus('idle', 'Session stopped');
+  });
 }
 
 // Start the session timer
@@ -911,10 +1332,22 @@ function startSessionTimer() {
     clearInterval(sessionTimer);
   }
   
+  // Update duration immediately once
+  if (currentSession && currentSession.status === 'active') {
+    const duration = getSessionDuration();
+    domElements.sessionDuration.textContent = formatDuration(duration);
+  }
+  
   sessionTimer = setInterval(() => {
     if (currentSession && currentSession.status === 'active') {
       const duration = getSessionDuration();
       domElements.sessionDuration.textContent = formatDuration(duration);
+      
+      // Save the current duration to the session periodically
+      if (duration % 10 === 0) { // Every 10 seconds
+        currentSession.duration = duration;
+        saveSession(currentSession);
+      }
     }
   }, 1000);
 }
@@ -961,9 +1394,17 @@ function formatDuration(seconds) {
 
 // Check if there's an existing monitoring alarm
 function checkMonitoringAlarm() {
-  chrome.alarms.get('monitoring', (alarm) => {
-    if (!alarm && currentSession && currentSession.status === 'active') {
-      // Recreate the alarm
+  // Instead of directly checking the alarm, ask the background script about the session state
+  chrome.runtime.sendMessage({ action: 'getCurrentState' }, (response) => {
+    if (chrome.runtime.lastError) {
+      log('Error checking monitoring state:', chrome.runtime.lastError);
+      return;
+    }
+    
+    // If we have an active session locally but the background doesn't, update it
+    if (currentSession && currentSession.status === 'active' && 
+        (!response.state.currentSession || response.state.currentSession.status !== 'active')) {
+      log('Session state mismatch - requesting background to start monitoring');
       startMonitoringAlarm();
     }
   });
@@ -974,63 +1415,120 @@ function startMonitoringAlarm() {
   const settings = saveSettings();
   const intervalSeconds = Math.max(10, settings.monitorInterval);
   
-  // Create alarm
-  chrome.alarms.create('monitoring', {
-    delayInMinutes: intervalSeconds / 60,
-    periodInMinutes: intervalSeconds / 60
+  // Send message to background script to create/update the alarm
+  chrome.runtime.sendMessage({
+    action: 'updateSessionSettings',
+    settings: {
+      monitorInterval: intervalSeconds
+    }
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      log('Error updating monitoring interval:', chrome.runtime.lastError);
+      return;
+    }
+    log(`Monitoring alarm requested with interval: ${intervalSeconds} seconds`);
   });
-  
-  // Listen for alarm
-  chrome.alarms.onAlarm.addListener(handleAlarm);
-  
-  log(`Monitoring alarm created with interval: ${intervalSeconds} seconds`);
 }
 
 // Update the monitoring alarm interval
 function updateMonitoringAlarm() {
-  stopMonitoringAlarm();
   startMonitoringAlarm();
 }
 
 // Stop the monitoring alarm
 function stopMonitoringAlarm() {
-  chrome.alarms.clear('monitoring');
-  chrome.alarms.onAlarm.removeListener(handleAlarm);
-  
-  log('Monitoring alarm cleared');
+  // No need to remove listener since we're not adding one anymore
+  chrome.runtime.sendMessage({
+    action: 'stopSession'
+  }, (response) => {
+    if (chrome.runtime.lastError) {
+      log('Error stopping monitoring alarm:', chrome.runtime.lastError);
+      return;
+    }
+    log('Monitoring alarm stop requested');
+  });
 }
 
-// Handle alarm event
+// Function kept for compatibility but no longer needs to register a listener
 function handleAlarm(alarm) {
-  if (alarm.name === 'monitoring') {
-    // Check if session is still active
-    if (currentSession && currentSession.status === 'active') {
-      // Trigger a capture
-      captureForMonitoring();
-    } else {
-      // Stop the alarm if session is not active
-      stopMonitoringAlarm();
-    }
-  }
+  // This function is no longer used to handle alarms directly
+  // All alarm handling is done in the background script
+  log('Local alarm handler called but ignored - using background handler');
 }
 
 // Capture the screen for monitoring
 function captureForMonitoring() {
   log('Automatic capture triggered by monitoring alarm');
   
+  if (!currentSession) {
+    log('No active session found, aborting monitoring capture');
+    return;
+  }
+  
+  // Get the monitoring prompt
+  const settings = saveSettings();
+  const monitorPrompt = settings.monitorPrompt || 'Analyze this image and describe what you see.';
+  
+  // Update session stats
+  currentSession.captureCount = (currentSession.captureCount || 0) + 1;
+  currentSession.lastCaptureTime = new Date().toISOString();
+  saveSession(currentSession);
+  
+  // Update UI
+  updateSessionUI();
+  
+  // Ensure the selected area is saved in the session
+  if (selectedArea && !currentSession.selectedArea) {
+    currentSession.selectedArea = selectedArea;
+    saveSession(currentSession);
+  }
+  
   // If we have a selected area, use that, otherwise capture the viewport
-  if (selectedArea) {
+  if (selectedArea || currentSession.selectedArea) {
+    const areaToCapture = selectedArea || currentSession.selectedArea;
+    log('Monitor: Capturing selected area', areaToCapture);
+    
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, {
-          action: 'captureArea',
-          area: selectedArea
+        // Send message to capture area
+        chrome.runtime.sendMessage({
+          action: 'captureViewportArea',
+          area: areaToCapture,
+          tabId: tabs[0].id,
+          windowId: tabs[0].windowId,
+          autoAnalyze: true, // Signal we want automatic analysis
+          monitorSession: {
+            sessionId: currentSession.id,
+            prompt: monitorPrompt,
+            conversationMode: settings.conversationMode || false
+          }
+        }, (response) => {
+          if (chrome.runtime.lastError || !response?.success) {
+            log('Error in monitor capture', chrome.runtime.lastError);
+            return;
+          }
+          log('Monitor capture successfully initiated');
         });
+      } else {
+        log('No active tab found for monitor capture');
       }
     });
   } else {
+    log('Monitor: Capturing viewport (no area selected)');
     chrome.runtime.sendMessage({
-      action: 'captureViewport'
+      action: 'captureViewport',
+      autoAnalyze: true, // Signal we want automatic analysis
+      monitorSession: {
+        sessionId: currentSession.id,
+        prompt: monitorPrompt,
+        conversationMode: settings.conversationMode || false
+      }
+    }, (response) => {
+      if (chrome.runtime.lastError || !response?.success) {
+        log('Error in monitor viewport capture', chrome.runtime.lastError);
+        return;
+      }
+      log('Monitor viewport capture successfully initiated');
     });
   }
 }
@@ -1690,267 +2188,146 @@ function handleSendApiRequest() {
       payloadText = `{${payloadText}}`;
     }
     
+    // Parse the JSON payload
     const payload = JSON.parse(payloadText);
-    const endpoint = domElements.apiEndpoint.value.trim();
     
+    // Disable UI
+    domElements.sendApiRequest.disabled = true;
     updateStatus(STATUS.PROCESSING, 'Sending API request...');
     
-    // Send to background script to handle the API request
+    // Send message to background script
     chrome.runtime.sendMessage({
       action: 'customApiRequest',
+      endpoint: domElements.apiEndpoint.value,
       payload,
-      apiKey,
-      endpoint
+      apiKey
     }, (response) => {
-      if (response && response.success) {
-        updateStatus(STATUS.ACTIVE, 'API request successful');
-        domElements.apiResponse.value = JSON.stringify(response.data, null, 2);
-      } else {
+      // Re-enable UI
+      domElements.sendApiRequest.disabled = false;
+      
+      if (chrome.runtime.lastError || !response.success) {
         updateStatus(STATUS.ERROR, 'API request failed');
-        domElements.apiResponse.value = JSON.stringify(response.error, null, 2);
+        domElements.apiResponse.value = JSON.stringify(response.error || chrome.runtime.lastError, null, 2);
+        return;
       }
+      
+      updateStatus(STATUS.ACTIVE, 'API request successful');
+      domElements.apiResponse.value = JSON.stringify(response.data, null, 2);
     });
   } catch (error) {
     updateStatus(STATUS.ERROR, 'Invalid JSON payload');
-    domElements.apiResponse.value = error.message;
+    domElements.apiResponse.value = error.toString();
   }
 }
 
 // Handle refresh storage button
 function handleRefreshStorage() {
-  const storageType = domElements.storageType.value;
-  
-  chrome.storage.local.get([STORAGE_KEYS[storageType.toUpperCase()]], (result) => {
-    const data = result[STORAGE_KEYS[storageType.toUpperCase()]] || [];
-    domElements.storageData.value = JSON.stringify(data, null, 2);
-  });
-  
-  // Update storage usage
-  updateStorageUsage();
+  // Implementation of handleRefreshStorage function
 }
 
 // Handle export storage button
 function handleExportStorage() {
-  const storageType = domElements.storageType.value;
-  
-  chrome.storage.local.get([STORAGE_KEYS[storageType.toUpperCase()]], (result) => {
-    const data = result[STORAGE_KEYS[storageType.toUpperCase()]] || [];
-    
-    // Create download link
-    const dataStr = JSON.stringify(data, null, 2);
-    const dataBlob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(dataBlob);
-    
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[:.]/g, '-')
-      .replace('T', '_')
-      .substring(0, 19);
-    
-    const downloadLink = document.createElement('a');
-    downloadLink.href = url;
-    downloadLink.download = `ai-watcher-${storageType}-${timestamp}.json`;
-    
-    // Append link and trigger download
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    
-    // Clean up
-    document.body.removeChild(downloadLink);
-    URL.revokeObjectURL(url);
-  });
+  // Implementation of handleExportStorage function
 }
 
 // Handle clear storage button
 function handleClearStorage() {
-  const storageType = domElements.storageType.value;
-  
-  if (!confirm(`Are you sure you want to clear all ${storageType}?`)) {
-    return;
-  }
-  
-  chrome.storage.local.set({ [STORAGE_KEYS[storageType.toUpperCase()]]: [] }, () => {
-    log(`${storageType} cleared`);
-    
-    // Refresh storage data
-    handleRefreshStorage();
-    
-    // If clearing responses, refresh history
-    if (storageType === 'responses') {
-      loadHistoryData();
-    }
-    
-    // If clearing sessions, refresh sessions dropdown
-    if (storageType === 'sessions') {
-      loadSessionsIntoFilter();
-    }
-  });
+  // Implementation of handleClearStorage function
 }
 
-// Add CSS for modals
-const modalStyles = `
-.response-modal {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  background-color: rgba(0, 0, 0, 0.5);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  z-index: 100;
-}
-
-.response-modal-content {
-  background-color: white;
-  border-radius: 4px;
-  width: 80%;
-  max-width: 350px;
-  max-height: 90%;
-  display: flex;
-  flex-direction: column;
-}
-
-.wide-modal .response-modal-content {
-  max-width: 500px;
-}
-
-.response-modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 15px;
-  border-bottom: 1px solid #dee2e6;
-}
-
-.response-modal-header h5 {
-  margin: 0;
-  font-size: 16px;
-}
-
-.response-modal-body {
-  padding: 15px;
-  overflow-y: auto;
-  flex: 1;
-}
-
-.response-modal-footer {
-  padding: 10px 15px;
-  border-top: 1px solid #dee2e6;
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.response-detail {
-  margin-bottom: 10px;
-}
-
-.detail-text {
-  background-color: #f8f9fa;
-  padding: 8px;
-  border-radius: 4px;
-  margin-top: 5px;
-  white-space: pre-wrap;
-}
-
-.response-image {
-  margin: 10px 0;
-  max-height: 150px;
-  overflow: hidden;
-  text-align: center;
-}
-
-.response-image img {
-  max-width: 100%;
-  max-height: 150px;
-}
-
-.logs-container {
-  background-color: #f8f9fa;
-  padding: 10px;
-  border-radius: 4px;
-  font-family: monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-.debug-mode .debug-info {
-  display: block !important;
-}
-`;
-
-// Add styles to document
-const styleElement = document.createElement('style');
-styleElement.textContent = modalStyles;
-document.head.appendChild(styleElement);
-
-// Save UI state to sync storage
-function saveUIState() {
-  const uiState = {
-    promptText: domElements.promptText?.value || '',
-    vlmModel: domElements.vlmModel?.value || DEFAULT_SETTINGS.vlmModel
-  };
-  
-  chrome.storage.sync.set({ 'ui_state': uiState }, () => {
-    log('UI state saved');
-  });
-}
-
-// Load UI state from sync storage
+// Load UI state from storage
 function loadUIState() {
-  chrome.storage.sync.get(['ui_state'], (result) => {
+  chrome.storage.local.get(['ui_state'], (result) => {
     const uiState = result.ui_state || {};
     
-    // Restore prompt text
+    // Restore active tab if saved
+    if (uiState.activeTab) {
+      // Find and click the tab button to switch to it
+      const tabButton = document.querySelector(`.tab-button[data-tab-id="${uiState.activeTab}"]`);
+      if (tabButton) {
+        tabButton.click();
+      }
+    }
+    
+    // Restore prompt text if saved
     if (uiState.promptText && domElements.promptText) {
       domElements.promptText.value = uiState.promptText;
     }
     
-    // Restore model selection
-    if (uiState.vlmModel && domElements.vlmModel) {
-      domElements.vlmModel.value = uiState.vlmModel;
-    }
-    
+    // Any other UI state can be restored here
     log('UI state loaded');
   });
 }
 
-// Check for any cached messages in the background
-function checkCachedMessages() {
-  chrome.runtime.sendMessage({ action: 'getCachedMessages' }, (response) => {
-    if (response && response.success && response.cache) {
-      log('Received cached messages from background:', response.cache);
-      
-      // Process each cached message
-      Object.values(response.cache).forEach(cachedItem => {
-        if (cachedItem && cachedItem.message) {
-          const msg = cachedItem.message;
-          log('Processing cached message:', msg.action);
-          
-          // Handle different message types
-          if (msg.action === 'captureComplete' && msg.data) {
-            log('Found cached capture - updating preview');
-            handleCaptureComplete(msg.data, false);
-          } else if (msg.action === 'analyzeComplete' && msg.data) {
-            handleAnalyzeComplete(msg.data);
-          } else if (msg.action === 'areaSelected' && msg.data) {
-            handleAreaSelected(msg.data);
-          }
-        }
-      });
+// Save UI state to storage
+function saveUIState() {
+  const uiState = {
+    activeTab: document.querySelector('.tab-button.active')?.dataset.tabId,
+    promptText: domElements.promptText?.value || ''
+    // Add other UI state elements as needed
+  };
+  
+  chrome.storage.local.set({ 'ui_state': uiState }, () => {
+    if (domElements.enableDebugMode?.checked) {
+      log('UI state saved');
     }
   });
 }
 
-// Handle test auto-capture and analyze button
-function handleTestAutoCaptureAnalyze() {
-  updateStatus(STATUS.PROCESSING, 'Starting auto-capture test...');
+// Update API key UI elements based on key validity
+function updateApiKeyUI(apiKey) {
+  if (!domElements.apiKeyStatus || !domElements.captureApiKey) {
+    return;
+  }
   
-  // Set a flag that we're in auto test mode
+  if (apiKey && apiKey.trim()) {
+    // Valid API key
+    domElements.apiKeyStatus.textContent = 'API Key: Set';
+    domElements.apiKeyStatus.className = 'badge bg-success';
+    domElements.captureApiKey.classList.remove('is-invalid');
+    domElements.captureApiKey.classList.add('is-valid');
+  } else {
+    // Invalid or missing API key
+    domElements.apiKeyStatus.textContent = 'API Key: Not Set';
+    domElements.apiKeyStatus.className = 'badge bg-warning';
+    domElements.captureApiKey.classList.remove('is-valid');
+    domElements.captureApiKey.classList.add('is-invalid');
+  }
+}
+
+// Switch between tabs
+function switchTab(tabId) {
+  // Hide all tabs
+  document.querySelectorAll('.tab-content').forEach(tab => {
+    tab.style.display = 'none';
+  });
+  
+  // Deactivate all tab buttons
+  document.querySelectorAll('.tab-button').forEach(button => {
+    button.classList.remove('active');
+  });
+  
+  // Show selected tab
+  const selectedTab = document.getElementById(tabId);
+  if (selectedTab) {
+    selectedTab.style.display = 'block';
+  }
+  
+  // Activate selected tab button
+  const selectedButton = document.querySelector(`.tab-button[data-tab-id="${tabId}"]`);
+  if (selectedButton) {
+    selectedButton.classList.add('active');
+  }
+  
+  // Save UI state
+  saveUIState();
+}
+
+// Handle test auto capture and analyze button click
+function handleTestAutoCaptureAnalyze() {
+  updateStatus(STATUS.PROCESSING, 'Auto-capturing and analyzing...');
+  
+  // Set a flag to indicate we're in auto test mode
   localStorage.setItem('autoTestMode', 'true');
   
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -1960,72 +2337,254 @@ function handleTestAutoCaptureAnalyze() {
     }
     
     const activeTab = tabs[0];
-    if (!activeTab.id) {
-      updateStatus(STATUS.ERROR, 'Invalid tab ID');
+
+    // Check if we have a selected area
+    if (selectedArea) {
+      log('Auto-test: Using selected area for capture', selectedArea);
+      
+      // Send message to capture the selected area
+      chrome.runtime.sendMessage({
+        action: 'captureViewportArea',
+        area: selectedArea,
+        tabId: activeTab.id,
+        windowId: activeTab.windowId
+      }, (response) => {
+        if (chrome.runtime.lastError || !response?.success) {
+          updateStatus(STATUS.ERROR, 'Auto-capture of area failed');
+          log('Auto-capture of area failed', chrome.runtime.lastError || response?.error);
+          // Clear flag
+          localStorage.removeItem('autoTestMode');
+          return;
+        }
+        
+        log('Auto-capture of area initiated successfully');
+        // The capture complete handler will automatically trigger analysis
+      });
+    } else {
+      // No area selected, capture viewport
+      log('Auto-test: No area selected, capturing entire viewport');
+      chrome.runtime.sendMessage({
+        action: 'captureViewport',
+        tabId: activeTab.id,
+        windowId: activeTab.windowId
+      }, (response) => {
+        if (chrome.runtime.lastError || !response?.success) {
+          updateStatus(STATUS.ERROR, 'Auto-capture failed');
+          log('Auto-capture failed', chrome.runtime.lastError || response?.error);
+          // Clear flag
+          localStorage.removeItem('autoTestMode');
+          return;
+        }
+        
+        log('Auto-capture initiated successfully');
+        // The capture complete handler will automatically trigger analysis
+      });
+    }
+  });
+}
+
+// Function to start the state update timer - make more frequent updates
+function startStateUpdateTimer() {
+  // Clear any existing timer
+  if (stateUpdateTimer) {
+    clearInterval(stateUpdateTimer);
+    stateUpdateTimer = null;
+  }
+  
+  // First update immediately
+  requestStateUpdate();
+  
+  // Set up timer to refresh state every 2 seconds (more frequent updates)
+  stateUpdateTimer = setInterval(requestStateUpdate, 2000);
+  
+  log('State update timer started (2s interval)');
+}
+
+// Function to request a state update from the background
+function requestStateUpdate() {
+  if (!currentSession || !currentSession.status) {
+    return; // Don't request if we don't have a session
+  }
+  
+  // Request current state from background
+  chrome.runtime.sendMessage({ action: 'getCurrentState' }, (response) => {
+    if (chrome.runtime.lastError) {
+      log('Error requesting state update:', chrome.runtime.lastError);
       return;
     }
     
-    // Define a fixed 100x100 area in the top-left corner
-    const area = {
-      left: 20, // Slight offset from corner for better visibility
-      top: 20,
-      width: 100,
-      height: 100,
-      devicePixelRatio: window.devicePixelRatio || 1
-    };
-    
-    // Update UI to show the area dimensions
-    pixelCounter = {
-      width: area.width,
-      height: area.height,
-      total: area.width * area.height
-    };
-    
-    if (domElements.selectionInfo) {
-      domElements.selectionInfo.style.display = 'block';
+    if (!response || !response.state) {
+      log('No state received from background');
+      return;
     }
     
-    if (domElements.dimensionsText) {
-      domElements.dimensionsText.textContent = `${area.width} x ${area.height} px`;
-    }
+    const bgState = response.state;
     
-    if (domElements.pixelsText) {
-      domElements.pixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
-    }
-    
-    // Calculate cost estimate
-    const costPerPixel = COST_ESTIMATES[domElements.vlmModel.value] || 0.00001;
-    const estimatedCost = (pixelCounter.total / 1000) * costPerPixel;
-    
-    if (domElements.costText) {
-      domElements.costText.textContent = `$${estimatedCost.toFixed(6)}`;
-    }
-    
-    updateStatus(STATUS.PROCESSING, 'Auto-capturing 100x100 area...');
-    log('Auto-test: Capturing 100x100 area from top-left', area);
-    
-    // Store the selected area for later use
-    selectedArea = area;
-    
-    // Request to capture this area
-    chrome.runtime.sendMessage({
-      action: 'captureViewportArea',
-      area: area,
-      tabId: activeTab.id,
-      windowId: activeTab.windowId
-    }, response => {
-      if (response && response.success) {
-        updateStatus(STATUS.PROCESSING, 'Area capture requested. Waiting for result...');
-        log('Auto-test: Capture request sent successfully');
+    // Critical: Only update if background has a current session - otherwise we might lose our session
+    if (bgState.currentSession) {
+      // Check if the sessions match
+      if (bgState.currentSession.id === currentSession.id) {
+        log(`Updating from background - captures: ${bgState.currentSession.captureCount}, status: ${bgState.currentSession.status}`);
         
-        // Set a default prompt for testing
-        if (domElements.promptText.value.trim() === '') {
-          domElements.promptText.value = 'Describe what you see in this image.';
+        // Preserve our session's active status if needed
+        if (currentSession.status === 'active' && bgState.currentSession.status !== 'active') {
+          log('CRITICAL: Background session not active, but popup session is active - preserving active status');
+          bgState.currentSession.status = 'active';
+          
+          // Send active status back to background
+          chrome.runtime.sendMessage({
+            action: 'updateSessionSettings',
+            settings: { forceStatusActive: true }
+          });
         }
+        
+        // Update our session data
+        currentSession.captureCount = bgState.currentSession.captureCount || currentSession.captureCount || 0;
+        currentSession.lastCaptureTime = bgState.currentSession.lastCaptureTime || currentSession.lastCaptureTime;
+        currentSession.apiCallCount = bgState.currentSession.apiCallCount || currentSession.apiCallCount || 0;
+        currentSession.rateLimitCount = bgState.currentSession.rateLimitCount || currentSession.rateLimitCount || 0;
+        
+        // Update next scheduled capture time and start countdown if needed
+        if (bgState.currentSession.nextScheduledCapture) {
+          currentSession.nextScheduledCapture = bgState.currentSession.nextScheduledCapture;
+          
+          // If countdown is not running, start it
+          if (!captureCountdownTimer && currentSession.status === 'active') {
+            startCaptureCountdown();
+          }
+        }
+        
+        // Update status
+        if (bgState.currentSession.nextScheduledCapture && currentSession.status === 'active') {
+          const nextCapture = new Date(bgState.currentSession.nextScheduledCapture);
+          const now = new Date();
+          const secondsUntilNext = Math.max(0, Math.round((nextCapture - now) / 1000));
+          
+          if (secondsUntilNext > 0) {
+            updateStatus(STATUS.ACTIVE, `Next capture in ${secondsUntilNext}s`);
+          }
+        }
+        
+        // Update UI to reflect new values
+        updateSessionUI();
+        
+        // Save session locally
+        saveSession(currentSession);
       } else {
-        updateStatus(STATUS.ERROR, 'Failed to capture area');
-        log('Auto-test: Capture request failed', response?.error);
+        // Different session - check if we should adopt the background's session
+        if (!currentSession || bgState.currentSession.startTime > currentSession.startTime) {
+          log('Adopting newer session from background');
+          currentSession = bgState.currentSession;
+          updateSessionUI();
+          
+          // If session is active, ensure timer is running
+          if (currentSession.status === 'active' && !sessionTimer) {
+            startSessionTimer();
+          }
+          
+          // If session is active, ensure capture countdown is running
+          if (currentSession.status === 'active' && currentSession.nextScheduledCapture) {
+            startCaptureCountdown();
+          }
+        }
       }
-    });
+    } else if (bgState.status) {
+      // Just update status message
+      updateStatus(bgState.status.type, bgState.status.message);
+    }
   });
-} 
+}
+
+// Function to stop the state update timer
+function stopStateUpdateTimer() {
+  if (stateUpdateTimer) {
+    clearInterval(stateUpdateTimer);
+    stateUpdateTimer = null;
+    log('State update timer stopped');
+  }
+}
+
+// Add a new countdown timer variable
+let captureCountdownTimer = null;
+
+// Function to start countdown until next capture
+function startCaptureCountdown(targetTimestamp) {
+  log('Starting capture countdown to:', new Date(targetTimestamp).toLocaleTimeString());
+
+  // Clear any existing countdown timer
+  if (captureCountdownTimer) {
+    clearInterval(captureCountdownTimer);
+  }
+
+  // Function to update the countdown
+  function updateCaptureCountdown() {
+    const now = Date.now();
+    const timeLeft = targetTimestamp - now;
+    
+    if (timeLeft <= 0) {
+      domElements.nextCaptureTimer.textContent = 'Due now';
+      domElements.nextCaptureTimer.classList.remove('bg-primary');
+      domElements.nextCaptureTimer.classList.add('bg-warning');
+    } else {
+      const seconds = Math.ceil(timeLeft / 1000);
+      if (seconds < 10) {
+        domElements.nextCaptureTimer.classList.remove('bg-primary');
+        domElements.nextCaptureTimer.classList.add('bg-warning');
+      } else {
+        domElements.nextCaptureTimer.classList.add('bg-primary');
+        domElements.nextCaptureTimer.classList.remove('bg-warning');
+      }
+      
+      // Format countdown as mm:ss
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      const formattedTime = `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+      
+      domElements.nextCaptureTimer.textContent = formattedTime;
+    }
+  }
+
+  // Update immediately first
+  updateCaptureCountdown();
+
+  // Then set interval to update every second
+  captureCountdownTimer = setInterval(updateCaptureCountdown, 1000);
+}
+
+// Update the session state handling when receiving a session update
+function handleSessionUpdate(sessionData) {
+  if (!sessionData) {
+    // Session ended or null data
+    log('Session update - no session data');
+    currentSession = null;
+    updateSessionUI();
+    stopSessionTimer();
+    return;
+  }
+
+  // Save reference to current session
+  currentSession = sessionData;
+  
+  // Update UI based on session state
+  updateSessionUI();
+  
+  // Start/update session timer if active
+  if (currentSession.status === 'active') {
+    startSessionTimer();
+    
+    // Handle countdown timer for next capture if we have a next scheduled time
+    if (currentSession.nextScheduledCapture) {
+      // Start or restart countdown to next capture
+      startCaptureCountdown(new Date(currentSession.nextScheduledCapture).getTime());
+    }
+  } else if (currentSession.status === 'paused') {
+    stopSessionTimer();
+    
+    // Also stop countdown timer
+    if (window.captureCountdownTimer) {
+      clearInterval(window.captureCountdownTimer);
+      window.captureCountdownTimer = null;
+      domElements.nextCaptureTimer.textContent = '--';
+    }
+  }
+}

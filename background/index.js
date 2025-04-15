@@ -7,6 +7,10 @@ const STORAGE_KEYS = {
   DEBUG: 'ai_watcher_debug'
 };
 
+// Add a state variable to track if an analysis is in progress
+let isAnalysisInProgress = false;
+const NEXT_CAPTURE_ALARM_NAME = 'ai_watcher_next_capture';
+
 // Default settings
 const DEFAULT_SETTINGS = {
   captureMethod: 'crop',
@@ -30,8 +34,33 @@ let backgroundState = {
 // Global message cache to store messages when popup is closed
 let messageCache = {};
 
+// Initialize offscreen document for canvas operations
+async function setupOffscreenDocument() {
+  // Check if we already have an offscreen document
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT']
+  });
+  
+  if (existingContexts.length > 0) {
+    log('Offscreen document already exists');
+    return;
+  }
+  
+  // Create an offscreen document for image processing
+  try {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['CANVAS_IMAGE_EXTRACTION'],
+      justification: 'Image processing for screenshot capture'
+    });
+    log('Offscreen document created for image processing');
+  } catch (error) {
+    log('Error creating offscreen document:', error);
+  }
+}
+
 // Initialize extension
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async () => {
   // Set default settings
   chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
     if (!result[STORAGE_KEYS.SETTINGS]) {
@@ -58,6 +87,9 @@ chrome.runtime.onInstalled.addListener(() => {
     }
   }
   
+  // Set up offscreen document for image manipulation
+  await setupOffscreenDocument();
+  
   // Log installation
   log('Extension installed');
 });
@@ -80,7 +112,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle messages from the original extension functionality
   if (message.message === 'capture' || message.message === 'active') {
     // Pass to original handler
-    handleOriginalExtensionMessage(message, sender, res);
+    handleOriginalExtensionMessage(message, sender, sendResponse);
     return true; // Keep channel open for original handler
   }
 
@@ -127,9 +159,34 @@ function handleNewExtensionMessage(message, sender, sendResponse) {
       break;
 
     case 'captureViewportArea':
-      captureViewportArea(message.area, message.tab);
-      sendResponse({ success: true });
-      break;
+      // Get tab info from message
+      const tabId = message.tabId;
+      const windowId = message.windowId;
+
+      const tab = { id: tabId, windowId: windowId };
+      
+      // See if there's an area in the message
+      if (message.area) {
+        log('Message contains area, using that:', message.area);
+        // Pass the additional options from the message for auto-analysis
+        captureViewportArea(message.area, tab, {
+          autoAnalyze: message.autoAnalyze,
+          monitorSession: message.monitorSession
+        });
+        sendResponse({ success: true });
+      } else if (backgroundState.selectedArea) {
+        log('Using area from background state:', backgroundState.selectedArea);
+        // Pass the additional options from the message for auto-analysis
+        captureViewportArea(backgroundState.selectedArea, tab, {
+          autoAnalyze: message.autoAnalyze,
+          monitorSession: message.monitorSession
+        });
+        sendResponse({ success: true });
+      } else {
+        log('No area found in message or background state');
+        sendResponse({ success: false, error: 'No selected area found' });
+      }
+      return true;
 
     case 'analyzeImage':
       analyzeImage(message.payload, message.apiKey, message.metadata);
@@ -249,31 +306,93 @@ function updateBackgroundState(newState) {
   }
 }
 
-// Handle alarm events
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'monitoring') {
-    log('Monitoring alarm triggered');
-    if (backgroundState.currentSession && backgroundState.currentSession.status === 'active') {
-      captureForMonitoring();
-    } else {
-      log('Session not active, clearing monitoring alarm');
-      stopMonitoringAlarm(); // Stop alarm if session ended unexpectedly
+// Completely rewrite the monitoring alarm functionality to be more reliable
+function startMonitoringAlarm() {
+    if (!backgroundState.currentSession) return;
+    
+    // Clear any existing alarms to avoid duplicates
+    chrome.alarms.clear(NEXT_CAPTURE_ALARM_NAME, (wasCleared) => {
+        log(`Previous monitoring alarm cleared: ${wasCleared}`);
+        
+        // Set isAnalysisInProgress to false to start fresh
+        isAnalysisInProgress = false;
+        
+        // Schedule the first capture immediately
+        scheduleNextMonitoringCapture(false, 0); // 0 seconds delay for the first capture
+        
+        log(`Sequential monitoring initialized for session: ${backgroundState.currentSession.id}`);
+    });
+}
+
+// Define the alarm handler for sequential monitoring
+function handleSequentialMonitoringAlarm(alarm) {
+    if (alarm.name === NEXT_CAPTURE_ALARM_NAME) {
+        log(`Alarm '${NEXT_CAPTURE_ALARM_NAME}' fired at: ${new Date().toLocaleTimeString()}`);
+        
+        if (isAnalysisInProgress) {
+            log('Analysis already in progress, not starting another capture cycle.');
+            return;
+        }
+        
+        // Set the busy flag at the start of the process
+        isAnalysisInProgress = true;
+        
+        // Update UI to show we're processing
+        updateBackgroundState({ status: { type: 'processing', message: 'Capturing for monitoring...' } });
+        
+        captureForMonitoring();
     }
-  }
-});
+    else if (alarm.name === 'resumeMonitoring') {
+        log('Resuming monitoring after backoff.');
+        // Check if the session is still supposed to be active
+        if (backgroundState.currentSession?.status === 'active') {
+            updateBackgroundState({ status: { type: 'active', message: 'Monitoring resumed after backoff' } });
+            // Schedule the next capture
+            scheduleNextMonitoringCapture();
+        } else {
+            log('Session changed/stopped during backoff, not resuming.');
+        }
+    }
+}
+
+// Remove any existing listeners and add the new alarm listener
+chrome.alarms.onAlarm.removeListener(handleMonitoringAlarm);
+chrome.alarms.onAlarm.addListener(handleSequentialMonitoringAlarm);
+
+// Update the stop function to clear both alarms
+function stopMonitoringAlarm() {
+    chrome.alarms.clear(NEXT_CAPTURE_ALARM_NAME);
+    chrome.alarms.clear('resumeMonitoring');
+    isAnalysisInProgress = false; // Clear busy flag
+    log('All monitoring alarms cleared');
+}
 
 // Capture viewport
-function captureViewport(tab) {
+function captureViewport(tab, options = {}) {
   updateBackgroundState({ status: { type: 'processing', message: 'Capturing viewport...' } });
   chrome.tabs.captureVisibleTab(tab?.windowId, { format: 'jpeg', quality: 70 }, (dataUrl) => {
     if (chrome.runtime.lastError) {
       log('Error capturing viewport', chrome.runtime.lastError);
       updateBackgroundState({ status: { type: 'error', message: 'Failed to capture viewport' } });
+      
+      // Clear busy flag and schedule next if this was for monitoring
+      if (options.monitorSession) {
+        isAnalysisInProgress = false;
+        scheduleNextMonitoringCapture(true);
+      }
       return;
     }
     const capturedData = { dataUrl, timestamp: new Date().toISOString() };
-    updateBackgroundState({ capturedImage: capturedData, selectedArea: null, status: { type: 'active', message: 'Viewport captured' } });
-    // broadcastMessage handled by updateBackgroundState
+    
+    // Update background state to clear selectedArea (viewport captures don't use selectedArea)
+    updateBackgroundState({ 
+      capturedImage: capturedData, 
+      status: { type: 'active', message: 'Viewport captured' } 
+    });
+    
+    // Process the captured image with the provided options
+    handleCapturedImage(capturedData, null, options);
+    
     log('Viewport captured');
   });
 }
@@ -325,18 +444,44 @@ function startAreaSelection(tab) {
 // Handle area selected event from content script
 function handleAreaSelected(data, tab) {
   log('Area selected data received', data);
-  updateBackgroundState({ selectedArea: data, status: { type: 'active', message: 'Area selected' } });
+  
+  // Update background state
+  updateBackgroundState({ 
+    selectedArea: data, 
+    status: { type: 'active', message: 'Area selected' } 
+  });
+  
+  // Also update the current session if active
+  if (backgroundState.currentSession && backgroundState.currentSession.status === 'active') {
+    backgroundState.currentSession.selectedArea = data;
+    updateBackgroundState({ currentSession: backgroundState.currentSession });
+    saveSession(backgroundState.currentSession);
+    
+    // Broadcast the updated session to ensure popup is in sync
+    broadcastMessage({
+      action: 'sessionUpdate',
+      session: backgroundState.currentSession
+    });
+    
+    log('Updated selected area in active session');
+  }
   
   // Immediately capture the selected area, even if popup is closed
   log('Auto-capturing the selected area after selection');
-  captureViewportArea(data, tab);
+  captureViewportArea(data, tab, { autoCapture: true });
 }
 
 // Capture viewport area based on selection
-function captureViewportArea(area, tab) {
+function captureViewportArea(area, tab, options = {}) {
   if (!area) {
     log('Attempted to capture area, but no area data provided');
     updateBackgroundState({ status: { type: 'warning', message: 'No area selected' } });
+    
+    // Clear busy flag and schedule next if this was for monitoring
+    if (options.monitorSession) {
+      isAnalysisInProgress = false;
+      scheduleNextMonitoringCapture(true);
+    }
     return;
   }
   
@@ -350,11 +495,17 @@ function captureViewportArea(area, tab) {
       if (!tabs || tabs.length === 0) {
         log('No active tab found for captureViewportArea');
         updateBackgroundState({ status: { type: 'error', message: 'Failed to find active tab for capture' } });
+        
+        // Clear busy flag and schedule next if this was for monitoring
+        if (options.monitorSession) {
+          isAnalysisInProgress = false;
+          scheduleNextMonitoringCapture(true);
+        }
         return;
       }
       // Recursive call with proper tab
       log('Found active tab, retrying captureViewportArea');
-      captureViewportArea(area, tabs[0]);
+      captureViewportArea(area, tabs[0], options);
     });
     return;
   }
@@ -365,6 +516,12 @@ function captureViewportArea(area, tab) {
     if (chrome.runtime.lastError) {
       log('Error capturing viewport for area crop', chrome.runtime.lastError);
       updateBackgroundState({ status: { type: 'error', message: 'Failed to capture for crop' } });
+      
+      // Clear busy flag and schedule next if this was for monitoring
+      if (options.monitorSession) {
+        isAnalysisInProgress = false;
+        scheduleNextMonitoringCapture(true);
+      }
       return;
     }
 
@@ -375,17 +532,17 @@ function captureViewportArea(area, tab) {
       .then(croppedDataUrl => {
         log('Image cropped successfully in background, size:', croppedDataUrl.length);
         const capturedData = { dataUrl: croppedDataUrl, timestamp: new Date().toISOString() };
-        handleCapturedImage(capturedData, area, 'background');
+        handleCapturedImage(capturedData, area, options);
       })
       .catch(error => {
         log('Error cropping image in background, trying content script method', error);
         
-        // Try the content script method as a better fallback
+        // Try the content script method as a first fallback
         cropImageInContentScript(tab.id, dataUrl, area)
           .then(croppedDataUrl => {
             log('Image cropped successfully in content script, size:', croppedDataUrl.length);
             const capturedData = { dataUrl: croppedDataUrl, timestamp: new Date().toISOString() };
-            handleCapturedImage(capturedData, area, 'content script');
+            handleCapturedImage(capturedData, area, options);
           })
           .catch(contentError => {
             log('Content script cropping also failed, using full viewport as fallback', contentError);
@@ -419,63 +576,86 @@ function captureViewportArea(area, tab) {
             }).catch(err => {
               log('Direct fallback message failed:', err);
             });
+            
+            // If this was for monitoring, handle the error and schedule next
+            if (options.monitorSession) {
+              // Still consider this a partial success for monitoring
+              handleCapturedImage(fallbackData, null, options);
+            }
           });
       });
   });
 }
 
 // Helper function to handle captured image processing
-function handleCapturedImage(capturedData, area, source = 'background') {
+function handleCapturedImage(capturedData, area, options = {}) {
   // Update background state with the captured image
   updateBackgroundState({ 
     capturedImage: capturedData, 
-    status: { type: 'active', message: `Area captured${source !== 'background' ? ` (${source})` : ''}` }
+    status: { type: 'active', message: 'Area captured' }
   });
   
   // Explicitly broadcast the capture complete message to ensure popup gets it
   try {
-    log(`Broadcasting captureComplete message (source: ${source})`);
+    log('Broadcasting captureComplete message');
     broadcastMessage({ 
       action: 'captureComplete', 
       data: capturedData,
-      analyze: false
+      analyze: options?.analyze !== undefined ? options.analyze : false
     });
     
     // Send an extra direct message to ensure the popup receives it
     chrome.runtime.sendMessage({ 
       action: 'captureComplete', 
       data: capturedData,
-      analyze: false
+      analyze: options?.analyze !== undefined ? options.analyze : false
     }).catch(err => {
       // This might fail if popup is not open, which is fine
-      log(`Direct captureComplete message failed (normal if popup closed): ${err.message}`);
+      log('Direct captureComplete message failed (normal if popup closed):', err);
     });
     
-    log('Area captured and cropped successfully, image broadcast to popup');
-  } catch (error) {
-    log('Error broadcasting capture complete:', error);
-  }
-
-  // If part of an active session, proceed to analysis
-  if (backgroundState.currentSession?.status === 'active') {
-    const session = backgroundState.currentSession;
-    session.captureCount = (session.captureCount || 0) + 1;
-    session.lastCaptureTime = new Date().toISOString();
-    updateBackgroundState({ currentSession: { ...session } }); // Trigger UI update
-    saveSession(session); // Save updated stats
-
-    if (session.settings?.prompt) {
-      analyzeImage(
-        { model: session.settings.vlmModel, prompt: session.settings.prompt, imageDataUrl: capturedData.dataUrl },
-        session.settings.apiKey,
-        { 
-          prompt: session.settings.prompt, 
-          imageSize: { width: area.width, height: area.height, total: area.width * area.height }, 
-          timestamp: capturedData.timestamp, 
-          sessionId: session.id 
-        }
-      );
+    // If this is a monitoring capture with autoAnalyze flag, analyze it automatically
+    if (options?.autoAnalyze === true && options?.monitorSession) {
+      log('Auto-analyzing captured image for monitoring session', options.monitorSession);
+      
+      // Get the monitoring session info
+      const sessionInfo = options.monitorSession;
+      const prompt = sessionInfo.prompt || 'Analyze this image';
+      
+      // If in conversation mode, prepend history to the prompt
+      let finalPrompt = prompt;
+      if (sessionInfo.conversationMode && backgroundState.currentSession?.conversationHistory?.length > 0) {
+        const history = backgroundState.currentSession.conversationHistory;
+        
+        // Format conversation history
+        finalPrompt = `Previous conversation:\n${history.join('\n\n')}\n\nNew image:\n${prompt}`;
+        log('Using conversation mode prompt with history', { historyLength: history.length });
+      }
+      
+      // Find API key in settings
+      chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
+        const settings = result[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
+        const apiKey = settings.apiKey?.trim() || DEFAULT_SETTINGS.apiKey;
+        
+        // Create payload for analysis
+        const payload = {
+          model: settings.vlmModel || DEFAULT_SETTINGS.vlmModel,
+          prompt: finalPrompt,
+          imageDataUrl: capturedData.dataUrl
+        };
+        
+        // Send for analysis
+        log('Auto-analyzing with prompt:', finalPrompt);
+        analyzeImage(payload, apiKey, {
+          prompt: finalPrompt,
+          sessionId: sessionInfo.sessionId,
+          isMonitoring: true,
+          conversationMode: sessionInfo.conversationMode
+        });
+      });
     }
+  } catch (err) {
+    log('Error in handleCapturedImage:', err);
   }
 }
 
@@ -582,143 +762,33 @@ function cropImageInContentScript(tabId, dataUrl, area) {
 
 // Crop image to selected area
 function cropImage(dataUrl, area) {
-  return new Promise((resolve, reject) => {
-    log('Starting to crop image', { area });
-    const img = new Image();
-    
-    img.onload = function() {
-      try {
-        log('Image loaded for cropping, dimensions:', { width: img.width, height: img.height });
-        
-        // Create canvas - in MV3 we need to be careful about canvas creation in background
-        const canvas = document.createElement('canvas');
-        
-        // Use 2d context with alpha: false for better performance
-        const ctx = canvas.getContext('2d', { alpha: false });
-        if (!ctx) {
-          throw new Error("Failed to get canvas context");
-        }
-        
-        // Scale based on device pixel ratio
-        const scaleFactor = area.devicePixelRatio || 1;
-        log('Using scale factor:', scaleFactor);
-        
-        // Validate area coordinates against image dimensions
-        const maxWidth = img.width / scaleFactor;
-        const maxHeight = img.height / scaleFactor;
-        
-        // Ensure area is within bounds
-        if (area.left < 0 || area.top < 0 || area.left + area.width > maxWidth || area.top + area.height > maxHeight) {
-          log('Warning: Selection area extends beyond image bounds, adjusting...', {
-            area,
-            imageDimensions: { width: maxWidth, height: maxHeight }
-          });
-          
-          // Adjust area to fit within bounds
-          const adjustedArea = {
-            left: Math.max(0, area.left),
-            top: Math.max(0, area.top),
-            width: Math.min(area.width, maxWidth - Math.max(0, area.left)),
-            height: Math.min(area.height, maxHeight - Math.max(0, area.top)),
-            devicePixelRatio: area.devicePixelRatio
-          };
-          
-          area = adjustedArea;
-          log('Adjusted area to:', area);
-        }
-        
-        // Set canvas dimensions - make sure they're integers to avoid issues
-        const canvasWidth = Math.round(area.width * scaleFactor);
-        const canvasHeight = Math.round(area.height * scaleFactor);
-        canvas.width = canvasWidth;
-        canvas.height = canvasHeight;
-        
-        if (canvasWidth <= 0 || canvasHeight <= 0) {
-          throw new Error("Invalid canvas dimensions: width or height is zero or negative");
-        }
-        
-        log('Canvas created with dimensions:', { width: canvas.width, height: canvas.height });
-        
-        // Draw cropped image
-        try {
-          // Clear canvas first
-          ctx.fillStyle = "#FFFFFF";
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          
-          // Calculate source coordinates - ensure they're integers to avoid blurry images
-          const sx = Math.round(area.left * scaleFactor);
-          const sy = Math.round(area.top * scaleFactor);
-          const sWidth = Math.round(area.width * scaleFactor);
-          const sHeight = Math.round(area.height * scaleFactor);
-          
-          log('Drawing image with params:', {
-            sx, sy, sWidth, sHeight,
-            dx: 0, dy: 0, 
-            dWidth: canvas.width, dHeight: canvas.height
-          });
-          
-          // Draw the image to canvas
-          ctx.drawImage(
-            img,
-            sx, sy, sWidth, sHeight,
-            0, 0, canvas.width, canvas.height
-          );
-          
-          // Get data URL - use JPEG for smaller size
-          let croppedDataUrl;
-          try {
-            croppedDataUrl = canvas.toDataURL('image/jpeg', 0.9);
-            log('Image successfully cropped, data URL length:', croppedDataUrl.length);
-            
-            // Check if the data URL is valid by checking its length and beginning
-            if (!croppedDataUrl || croppedDataUrl.length < 22 || !croppedDataUrl.startsWith('data:image/jpeg')) {
-              throw new Error('Generated data URL is invalid');
-            }
-            
-            resolve(croppedDataUrl);
-          } catch (dataUrlError) {
-            log('Error generating data URL:', dataUrlError);
-            reject(new Error('Failed to convert canvas to data URL'));
-          }
-        } catch (drawError) {
-          log('Error drawing image to canvas:', drawError, {
-            imgDimensions: { width: img.width, height: img.height },
-            area: area,
-            scaledArea: {
-              x: Math.round(area.left * scaleFactor),
-              y: Math.round(area.top * scaleFactor),
-              width: Math.round(area.width * scaleFactor),
-              height: Math.round(area.height * scaleFactor)
-            }
-          });
-          reject(new Error('Failed to draw image to canvas: ' + drawError.message));
-        }
-      } catch (error) {
-        log('Error during canvas setup:', error);
-        reject(new Error('Canvas setup failed: ' + error.message));
-      }
-    };
-    
-    img.onerror = function(e) {
-      log('Failed to load image for cropping:', e);
-      reject(new Error('Failed to load image'));
-    };
-    
-    // Set crossOrigin to anonymous to handle CORS issues
-    img.crossOrigin = "anonymous";
+  return new Promise(async (resolve, reject) => {
+    log('Starting to crop image in offscreen document', { area });
     
     try {
-      img.src = dataUrl;
+      // Make sure the offscreen document is ready
+      await setupOffscreenDocument();
       
-      // If the image is already cached, the onload event might not fire
-      // This is a fallback to handle that case
-      if (img.complete) {
-        log('Image already loaded (cached), triggering onload handler');
-        img.onload();
-      }
+      // Send message to offscreen document to crop the image
+      chrome.runtime.sendMessage({
+        action: 'cropImage',
+        dataUrl: dataUrl,
+        area: area
+      }).then(response => {
+        if (response && response.success) {
+          log('Image cropped successfully in offscreen document');
+          resolve(response.dataUrl);
+        } else {
+          log('Offscreen cropping failed:', response?.error || 'Unknown error');
+          reject(new Error(response?.error || 'Offscreen cropping failed'));
+        }
+      }).catch(error => {
+        log('Error sending message to offscreen document:', error);
+        reject(error);
+      });
     } catch (error) {
-      log('Error setting image source:', error);
-      reject(new Error('Failed to set image source: ' + error.message));
+      log('Error in cropImage with offscreen document:', error);
+      reject(error);
     }
   });
 }
@@ -728,9 +798,29 @@ function analyzeImage(payload, apiKey, metadata) {
   updateBackgroundState({ status: { type: 'processing', message: 'Sending to VLM API...' } });
 
   const modelId = payload.model;
-  const prompt = payload.prompt;
+  let prompt = payload.prompt;
   const imageDataUrl = payload.imageDataUrl;
   const imageSize = metadata.imageSize || { width:0, height:0, total: 0 }; // Get size from metadata
+  
+  // IMPORTANT: Log the state of the session before API call for debugging
+  log('Session state before API call:', {
+    session: backgroundState.currentSession ? {
+      id: backgroundState.currentSession.id,
+      status: backgroundState.currentSession.status,
+      captureCount: backgroundState.currentSession.captureCount
+    } : 'No session',
+    isMonitoring: metadata.isMonitoring
+  });
+
+  // Add conversation history to prompt if enabled
+  if (metadata.isMonitoring && backgroundState.currentSession && 
+      metadata.conversationMode && backgroundState.currentSession.conversationHistory?.length > 0) {
+    const historyText = backgroundState.currentSession.conversationHistory.join('\n');
+    prompt = `Conversation History:\n${historyText}\n\n---\n\nNew Query: ${prompt}`;
+    log('Using conversation mode prompt with history length:', backgroundState.currentSession.conversationHistory.length);
+  } else {
+    log('Using standard prompt without conversation history');
+  }
 
   // Construct the actual API payload based on provider
   let apiPayload = {};
@@ -780,7 +870,7 @@ function analyzeImage(payload, apiKey, metadata) {
   if (backgroundState.currentSession?.status === 'active') {
       const session = backgroundState.currentSession;
       session.apiCallCount = (session.apiCallCount || 0) + 1;
-      updateBackgroundState({ currentSession: { ...session } });
+      updateBackgroundState({ currentSession: session });
       saveSession(session); // Save updated stats
   }
 
@@ -808,7 +898,55 @@ function analyzeImage(payload, apiKey, metadata) {
 
       saveResponse(resultData); // Save the structured response
 
-      updateBackgroundState({ status: { type: 'active', message: 'Analysis complete' } });
+      // Handle conversation history if enabled
+      if (metadata.isMonitoring && backgroundState.currentSession && 
+          metadata.conversationMode && backgroundState.currentSession.conversationHistory) {
+        backgroundState.currentSession.conversationHistory.push(`User: ${metadata.prompt}`);
+        backgroundState.currentSession.conversationHistory.push(`AI: ${responseText}`);
+        // Limit history size (e.g., last 10 exchanges = 20 entries)
+        if (backgroundState.currentSession.conversationHistory.length > 20) {
+          backgroundState.currentSession.conversationHistory = backgroundState.currentSession.conversationHistory.slice(-20);
+        }
+        updateBackgroundState({ currentSession: backgroundState.currentSession });
+        saveSession(backgroundState.currentSession); // Save updated history
+        log('Updated conversation history');
+      }
+
+      // IMPORTANT: Check session status after API call - ensure it's still active if this is for monitoring
+      log('Session state after API call:', {
+        session: backgroundState.currentSession ? {
+          id: backgroundState.currentSession.id,
+          status: backgroundState.currentSession.status,
+          captureCount: backgroundState.currentSession.captureCount
+        } : 'No session',
+        isMonitoring: metadata.isMonitoring
+      });
+      
+      // Make sure we preserve session state if this is a monitoring call
+      if (metadata.isMonitoring && backgroundState.currentSession) {
+        // Verify the session is still active and update status to active
+        if (backgroundState.currentSession.status !== 'active') {
+          log('WARNING: Session was not active after API call, restoring active state');
+          backgroundState.currentSession.status = 'active';
+          updateBackgroundState({ 
+            currentSession: backgroundState.currentSession,
+            status: { type: 'active', message: 'Analysis complete - monitoring continuing' }
+          });
+          saveSession(backgroundState.currentSession);
+        } else {
+          // Just update status message
+          updateBackgroundState({ status: { type: 'active', message: 'Analysis complete - monitoring continuing' } });
+        }
+        
+        // Schedule the next capture - sequential approach ensures it only starts after analysis completes
+        scheduleNextMonitoringCapture();
+      } else {
+        // Standard update for non-monitoring analysis
+        updateBackgroundState({ status: { type: 'active', message: 'Analysis complete' } });
+        // Clear analysis flag since this wasn't for monitoring
+        isAnalysisInProgress = false;
+      }
+      
       broadcastMessage({ action: 'analyzeComplete', data: { response: resultData } }); // Send structured response to popup
       log('VLM API request successful', { modelId });
 
@@ -832,19 +970,37 @@ function analyzeImage(payload, apiKey, metadata) {
         if (backgroundState.currentSession?.status === 'active') {
             const session = backgroundState.currentSession;
             session.rateLimitCount = (session.rateLimitCount || 0) + 1;
-            updateBackgroundState({ currentSession: { ...session } });
+            updateBackgroundState({ currentSession: session });
             saveSession(session); // Save updated stats
 
             // Handle auto-backoff
             chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (res) => {
                 const settings = res[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
                 if (settings.autoBackoff) {
-                    handleAutoBackoff(session);
+                    // Use a modified backoff that respects our sequential monitoring
+                    handleSequentialAutoBackoff(session);
+                    return; // Skip normal scheduling
+                } else {
+                    // Schedule next with normal interval
+                    scheduleNextMonitoringCapture(true);
                 }
             });
+        } else {
+          // Clear analysis flag since session not active
+          isAnalysisInProgress = false;
         }
       } else {
-          updateBackgroundState({ status: { type: 'error', message: error.message || 'Analysis failed' } });
+          // For non-rate-limit errors, make sure we don't stop the session if this is monitoring
+          if (metadata.isMonitoring && backgroundState.currentSession) {
+            log('API error during monitoring, but continuing session');
+            updateBackgroundState({ status: { type: 'error', message: 'API error - continuing monitoring' } });
+            // Schedule next capture after error
+            scheduleNextMonitoringCapture(true);
+          } else {
+            updateBackgroundState({ status: { type: 'error', message: error.message || 'Analysis failed' } });
+            // Clear analysis flag since this wasn't for monitoring or it failed
+            isAnalysisInProgress = false;
+          }
       }
 
       // Send error details for analysis completion message
@@ -1010,21 +1166,32 @@ function handleStartSession(initialSelectedArea, initialPrompt) {
             apiCallCount: 0,
             rateLimitCount: 0,
             lastCaptureTime: null,
+            nextScheduledCapture: null, // Will be set after first capture
             // Store relevant settings for this session
             settings: {
                 monitorInterval: settings.monitorInterval,
                 vlmModel: settings.vlmModel,
-                prompt: initialPrompt || '', // Use prompt from popup
+                monitorPrompt: initialPrompt || '', // Use prompt from popup
                 apiKey: settings.apiKey,
                 enableNotifications: settings.enableNotifications,
-                autoBackoff: settings.autoBackoff
+                autoBackoff: settings.autoBackoff,
+                conversationMode: settings.conversationMode || false
             },
-            selectedArea: initialSelectedArea || backgroundState.selectedArea // Use area from popup or background state
+            selectedArea: initialSelectedArea || backgroundState.selectedArea, // Use area from popup or background state
+            conversationHistory: [] // Initialize conversation history
         };
 
-        updateBackgroundState({ currentSession: newSession, status: { type: 'active', message: 'Session started' } });
+        updateBackgroundState({ 
+            currentSession: newSession, 
+            status: { type: 'active', message: 'Session started, capturing first image...' } 
+        });
         saveSession(newSession); // Save to local storage
-        startMonitoringAlarm(); // Start the interval timer
+        
+        // Start with analysis not in progress
+        isAnalysisInProgress = false;
+        
+        // Trigger the first capture immediately
+        startMonitoringAlarm();
     });
 }
 
@@ -1034,14 +1201,23 @@ function handlePauseSession() {
         return;
     }
     log('Pausing session...');
-    stopMonitoringAlarm(); // Stop the interval timer
+    stopMonitoringAlarm(); // Stop the next scheduled capture
+    
+    // Clear any analysis in progress
+    isAnalysisInProgress = false;
+    
     const updatedSession = {
         ...backgroundState.currentSession,
         status: 'paused',
-        pauseTime: new Date().toISOString()
+        pauseTime: new Date().toISOString(),
+        nextScheduledCapture: null // Clear scheduled time
     };
+    
     updateBackgroundState({ currentSession: updatedSession, status: { type: 'idle', message: 'Session paused' } });
     saveSession(updatedSession);
+    
+    // Ensure popup is notified
+    broadcastMessage({ action: 'sessionUpdate', session: updatedSession });
 }
 
 function handleResumeSession() { // Potentially useful if pause/resume UI exists
@@ -1068,32 +1244,83 @@ function handleStopSession() {
         return;
     }
     log('Stopping session...');
-    stopMonitoringAlarm(); // Stop the interval timer
+    stopMonitoringAlarm(); // Stop the next scheduled capture
+    
+    // Clear any analysis in progress
+    isAnalysisInProgress = false;
+    
     const session = backgroundState.currentSession;
     const updatedSession = {
         ...session,
         status: 'completed',
         endTime: new Date().toISOString(),
-        duration: calculateSessionDuration(session) // Calculate final duration
+        duration: calculateSessionDuration(session), // Calculate final duration
+        nextScheduledCapture: null // Clear scheduled time
     };
+    
     updateBackgroundState({ currentSession: null, status: { type: 'idle', message: 'Session completed' } });
     saveSession(updatedSession);
+    
+    // Ensure popup is notified
+    broadcastMessage({ action: 'sessionUpdate', session: null });
 }
 
 function handleUpdateSessionSettings(settingsUpdate) {
     if (!backgroundState.currentSession) return;
     log('Updating session settings:', settingsUpdate);
+    
+    // Special case: Force the session to be active
+    if (settingsUpdate.forceStatusActive === true) {
+        log('CRITICAL: Force active session status received from popup');
+        if (backgroundState.currentSession.status !== 'active') {
+            backgroundState.currentSession.status = 'active';
+            
+            // Restart monitoring since session is being forced active
+            if (!isAnalysisInProgress) {
+                scheduleNextMonitoringCapture();
+            }
+        }
+        
+        // Ensure update reaches storage
+        updateBackgroundState({ 
+            currentSession: backgroundState.currentSession,
+            status: { type: 'active', message: 'Monitoring reactivated' }
+        });
+        saveSession(backgroundState.currentSession);
+        return;
+    }
+    
+    // Handle conversation mode toggle
+    if ('conversationMode' in settingsUpdate) {
+        // If turning on conversation mode, initialize history if needed
+        if (settingsUpdate.conversationMode && !backgroundState.currentSession.conversationHistory) {
+            backgroundState.currentSession.conversationHistory = [];
+        }
+    }
+    
+    // Handle monitor prompt update
+    if ('monitorPrompt' in settingsUpdate) {
+        backgroundState.currentSession.settings.monitorPrompt = settingsUpdate.monitorPrompt;
+    }
+    
+    // Regular settings update
     const updatedSession = {
         ...backgroundState.currentSession,
         settings: { ...backgroundState.currentSession.settings, ...settingsUpdate }
     };
+    
     updateBackgroundState({ currentSession: updatedSession });
     saveSession(updatedSession);
-
-    // If interval changed and session is active, restart alarm
-    if ('monitorInterval' in settingsUpdate && updatedSession.status === 'active') {
-        stopMonitoringAlarm();
-        startMonitoringAlarm();
+    
+    // If interval changed and session is active, reschedule next capture
+    if ('monitorInterval' in settingsUpdate && 
+        updatedSession.status === 'active' && 
+        !isAnalysisInProgress &&
+        updatedSession.nextScheduledCapture) {
+        
+        log('Monitor interval changed, rescheduling next capture with new interval.');
+        // Use a special flag to indicate this is just an interval change reschedule
+        scheduleNextMonitoringCapture(false);
     }
 }
 
@@ -1114,73 +1341,135 @@ function calculateSessionDuration(session) {
     return Math.max(0, totalDuration); // Ensure duration is not negative
 }
 
-function startMonitoringAlarm() {
-    if (!backgroundState.currentSession) return;
-    const intervalSeconds = Math.max(10, backgroundState.currentSession.settings.monitorInterval);
-    chrome.alarms.create('monitoring', {
-        // delayInMinutes: 0.1, // Start almost immediately for testing
-        periodInMinutes: intervalSeconds / 60
-    });
-    log(`Monitoring alarm created/updated with interval: ${intervalSeconds} seconds`);
-}
-
-function stopMonitoringAlarm() {
-    chrome.alarms.clear('monitoring');
-    log('Monitoring alarm cleared');
-}
-
 function captureForMonitoring() {
-    if (!backgroundState.currentSession) return;
-    log('Automatic capture triggered by monitoring alarm');
+    if (!backgroundState.currentSession || backgroundState.currentSession.status !== 'active') {
+        log('captureForMonitoring: Session not active.');
+        isAnalysisInProgress = false; // Clear busy flag if called incorrectly
+        return;
+    }
+    
+    log('Automatic capture triggered for monitoring');
     const session = backgroundState.currentSession;
-
+    
+    // Update session stats BEFORE capture
+    session.captureCount = (session.captureCount || 0) + 1;
+    session.lastCaptureTime = new Date().toISOString();
+    
+    // Update background state with the updated session
+    updateBackgroundState({ currentSession: session });
+    saveSession(session); // Save immediately so data isn't lost
+    
+    // Broadcast the updated session to popup
+    broadcastMessage({
+      action: 'sessionUpdate',
+      session: session
+    });
+    
     // Find an active tab to capture from (best effort)
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const targetTab = tabs[0];
         if (!targetTab) {
             log('Monitor capture: No active tab found.');
-            // Optionally try capturing any window's active tab
-            // Or notify the user the monitor couldn't run
+            isAnalysisInProgress = false; // Clear busy flag on error
+            scheduleNextMonitoringCapture(true); // Schedule next attempt anyway
             return;
         }
 
+        // Prepare monitoring session info for analysis
+        const monitorSessionInfo = {
+            sessionId: session.id,
+            prompt: session.settings.monitorPrompt || 'Analyze this image',
+            conversationMode: session.settings.conversationMode || false
+        };
+
         if (session.selectedArea) {
             log('Monitor: Capturing selected area');
-            captureViewportArea(session.selectedArea, targetTab);
+            captureViewportArea(session.selectedArea, targetTab, {
+              autoAnalyze: true,
+              monitorSession: monitorSessionInfo
+            });
         } else {
             log('Monitor: Capturing viewport');
-            captureViewport(targetTab);
+            captureViewport(targetTab, {
+              autoAnalyze: true,
+              monitorSession: monitorSessionInfo
+            });
         }
-        // Analysis will be triggered by capture complete if needed
     });
 }
 
-function handleAutoBackoff(session) {
+function handleSequentialAutoBackoff(session) {
     if (!session || session.status !== 'active') return;
 
-    stopMonitoringAlarm(); // Stop regular checks
+    // Clear any existing alarms
+    stopMonitoringAlarm();
+    
+    // Calculate backoff time based on number of rate limits hit
     const backoffTimeSeconds = Math.min(300, Math.pow(2, session.rateLimitCount || 0) + 5);
     log(`Rate limit auto-backoff: Pausing monitoring for ${backoffTimeSeconds} seconds.`);
     updateBackgroundState({ status: { type: 'warning', message: `Rate limit: Backing off ${backoffTimeSeconds}s` } });
 
+    // Clear the busy flag
+    isAnalysisInProgress = false;
+    
+    // Update the session with the backoff time
+    session.nextScheduledCapture = Date.now() + (backoffTimeSeconds * 1000);
+    updateBackgroundState({ currentSession: session });
+    saveSession(session);
+    
+    // Broadcast update so popup shows backoff time
+    broadcastMessage({ action: 'sessionUpdate', session: session });
+
     // Set a one-time alarm to resume monitoring
     chrome.alarms.create('resumeMonitoring', { delayInMinutes: backoffTimeSeconds / 60 });
+}
 
-    // Listener specifically for resuming after backoff
-    const resumeListener = (alarm) => {
-        if (alarm.name === 'resumeMonitoring') {
-            log('Resuming monitoring after backoff.');
-            // Check if the session is still supposed to be active
-            if (backgroundState.currentSession?.id === session.id && backgroundState.currentSession?.status === 'active') {
-                 updateBackgroundState({ status: { type: 'active', message: 'Monitoring resumed' } });
-                 startMonitoringAlarm(); // Restart periodic alarm
-            } else {
-                 log('Session changed/stopped during backoff, not resuming alarm.');
-            }
-            chrome.alarms.onAlarm.removeListener(resumeListener); // Clean up this listener
-        }
-    };
-    chrome.alarms.onAlarm.addListener(resumeListener);
+// New function to schedule the next capture using a one-time alarm
+function scheduleNextMonitoringCapture(afterError = false, delaySecondsOverride = null) {
+    // Clear the busy flag FIRST, regardless of whether session is active
+    isAnalysisInProgress = false;
+    log('Analysis complete. Busy flag cleared.');
+
+    if (!backgroundState.currentSession || backgroundState.currentSession.status !== 'active') {
+        log('scheduleNextMonitoringCapture: Session is not active, not scheduling next capture.');
+        stopMonitoringAlarm(); // Ensure alarm is cleared
+        return;
+    }
+
+    // Get interval from session settings or use override
+    const intervalSeconds = delaySecondsOverride !== null ? 
+        delaySecondsOverride : 
+        (backgroundState.currentSession.settings?.monitorInterval || DEFAULT_SETTINGS.monitorInterval);
+    
+    // Convert to minutes for the alarm API (minimum is 0.1 minute or 6 seconds)
+    const delayMinutes = Math.max(0.1, intervalSeconds / 60); 
+    
+    // Calculate the actual time of the next capture
+    const nextCaptureTime = Date.now() + (intervalSeconds * 1000);
+
+    log(`Scheduling next capture in ${intervalSeconds} seconds (alarm delay: ${delayMinutes.toFixed(2)} mins).`);
+
+    // Update session state with next scheduled time
+    backgroundState.currentSession.nextScheduledCapture = nextCaptureTime;
+    updateBackgroundState({
+        currentSession: backgroundState.currentSession,
+        status: { type: 'active', message: `Waiting for next capture (${intervalSeconds}s)...` }
+    });
+    saveSession(backgroundState.currentSession); // Save the next scheduled time
+
+    // Clear any previous 'nextCapture' alarm before setting a new one
+    chrome.alarms.clear(NEXT_CAPTURE_ALARM_NAME, (wasCleared) => {
+        log(`Previous '${NEXT_CAPTURE_ALARM_NAME}' alarm cleared: ${wasCleared}`);
+
+        // Create a new one-time alarm
+        chrome.alarms.create(NEXT_CAPTURE_ALARM_NAME, {
+            delayInMinutes: delayMinutes
+        });
+        log(`'${NEXT_CAPTURE_ALARM_NAME}' alarm created.`);
+
+        // Broadcast the update so the popup shows the countdown
+        broadcastMessage({ action: 'sessionUpdate', session: backgroundState.currentSession });
+    });
 }
 
 // --- Storage Functions --- //
