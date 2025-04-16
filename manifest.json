@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "AI Screen Watcher",
+  "name": "Screen Scoutr",
   "version": "4.0",
   "description": "Capture screen areas, analyze with VLMs, and get alerts based on content detection",
 
-  "homepage_url": "https://github.com/yourusername/ai-screen-watcher",
+  "homepage_url": "https://github.com/Manojbhat09/vlm-monitor_chrome",
 
   "icons": {
     "16": "/icons/default/16x16.png",
@@ -22,7 +22,7 @@
       "48": "/icons/default/48x48.png",
       "128": "/icons/default/128x128.png"
     },
-    "default_title": "AI Screen Watcher",
+    "default_title": "Screen Scoutr",
     "default_popup": "popup/index.html"
   },
 
@@ -45,7 +45,8 @@
         "/vendor/bootstrap-icons/fonts/bootstrap-icons.woff",
         "/icons/default/icon.svg",
         "/icons/dark/icon.svg", 
-        "/icons/light/icon.svg"
+        "/icons/light/icon.svg",
+        "/data/models.json"
       ]
     }
   ],

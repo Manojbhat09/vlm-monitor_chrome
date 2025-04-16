@@ -18,7 +18,7 @@ const STORAGE_KEYS = {
 // Default settings
 const DEFAULT_SETTINGS = {
   captureMethod: 'crop',
-  vlmModel: 'anthropic/claude-3-haiku',
+  vlmModel: 'moonshotai/kimi-vl-a3b-thinking:free',
   monitorInterval: 30,
   enableNotifications: true,
   autoBackoff: true,
@@ -42,53 +42,187 @@ let pixelCounter = {
 // Add a periodic state update timer
 let stateUpdateTimer = null;
 
-// Cost estimator per 1000 pixels (approximate)
-const COST_ESTIMATES = {
-  'anthropic/claude-3-haiku': 0.000015,
-  'google/gemini-pro-vision': 0.000010,
-  'openai/gpt-4-vision': 0.000030
-};
+// Model information loaded from JSON
+let MODELS_DATA = [];
+let COST_ESTIMATES = {}; // Will be populated from MODELS_DATA
 
 // DOM elements
 const domElements = {};
 
 // Initialize when DOM content is loaded
 document.addEventListener('DOMContentLoaded', () => {
-  // Cache DOM elements
-  cacheElements();
+  // Load model data first
+  loadModelData().then(() => {
+    // Cache DOM elements
+    cacheElements();
+    
+    // Initialize Bootstrap tabs
+    const triggerTabList = [].slice.call(document.querySelectorAll('#mainTabs button'));
+    triggerTabList.forEach(function (triggerEl) {
+      const tabTrigger = new bootstrap.Tab(triggerEl);
   
-  // Initialize Bootstrap tabs
-  const triggerTabList = [].slice.call(document.querySelectorAll('#mainTabs button'));
-  triggerTabList.forEach(function (triggerEl) {
-    const tabTrigger = new bootstrap.Tab(triggerEl);
-
-    triggerEl.addEventListener('click', function (event) {
-      event.preventDefault();
-      tabTrigger.show();
+      triggerEl.addEventListener('click', function (event) {
+        event.preventDefault();
+        tabTrigger.show();
+      });
     });
+    
+    // Check for any cached messages from background
+    checkCachedMessages();
+    
+    // Request current state from background
+    requestCurrentState();
+    
+    // Load settings
+    loadSettings();
+    
+    // Load UI state from storage
+    loadUIState();
+    
+    // Initialize UI (basic setup, state will be applied after response)
+    initUI();
+    
+    // Attach event listeners
+    attachEventListeners();
+    
+    // Listen for messages from background or content scripts
+    chrome.runtime.onMessage.addListener(handleMessages);
+  }).catch(error => {
+    console.error('Error loading model data:', error);
   });
-  
-  // Check for any cached messages from background
-  checkCachedMessages();
-  
-  // Request current state from background
-  requestCurrentState();
-  
-  // Load settings
-  loadSettings();
-  
-  // Load UI state from storage
-  loadUIState();
-  
-  // Initialize UI (basic setup, state will be applied after response)
-  initUI();
-  
-  // Attach event listeners
-  attachEventListeners();
-  
-  // Listen for messages from background or content scripts
-  chrome.runtime.onMessage.addListener(handleMessages);
 });
+
+// Load model data from JSON file
+async function loadModelData() {
+  try {
+    const response = await fetch(chrome.runtime.getURL('data/models.json'));
+    const data = await response.json();
+    MODELS_DATA = data.models;
+    
+    // Initialize cost estimates from model data - NOW SUPPORTING BOTH PER-IMAGE AND PER-PIXEL COSTS
+    MODELS_DATA.forEach(model => {
+      // These costs in models.json are per million tokens, convert to per-token
+      // For Claude 3 Haiku: 0.25 per M tokens = 0.00000025 per token
+      const inputTokenCost = model.inputTokenCost / 1000000; 
+      const outputTokenCost = model.outputTokenCost / 1000000;
+      
+      // Image cost in models.json depends on the pricing model
+      // Either per-image or per-pixel
+      const imageInputCost = model.imageInputCost;
+      const isPixelBased = model.isPixelBased || false;
+      
+      COST_ESTIMATES[model.id] = {
+        inputCost: inputTokenCost,
+        outputCost: outputTokenCost,
+        imageInputCost: imageInputCost,
+        isPixelBased: isPixelBased
+      };
+      
+      log(`Cost for ${model.id}:`, { 
+        inputCost: inputTokenCost, 
+        outputCost: outputTokenCost, 
+        imageInputCost: imageInputCost,
+        isPixelBased: isPixelBased
+      });
+    });
+    
+    log('Model data loaded', MODELS_DATA.length);
+    log('Cost estimates initialized:', COST_ESTIMATES);
+    return true;
+  } catch (error) {
+    log('Error loading model data', error);
+    
+    // Fallback to default cost estimates if model data can't be loaded
+    COST_ESTIMATES = {
+      'anthropic/claude-3-haiku': { inputCost: 0.00000025, outputCost: 0.00000075, imageInputCost: 0.0016, isPixelBased: false },
+      'openai/gpt-4-vision': { inputCost: 0.00001, outputCost: 0.00003, imageInputCost: 0.0064, isPixelBased: false },
+      'google/gemini-pro-vision': { inputCost: 0.00000125, outputCost: 0.000005, imageInputCost: 0.00516, isPixelBased: false },
+      'test/pixel-based-model': { inputCost: 0.000001, outputCost: 0.000002, imageInputCost: 0.0000001, isPixelBased: true }
+    };
+    
+    log('Using fallback cost estimates:', COST_ESTIMATES);
+    return false;
+  }
+}
+
+// Populate model dropdown from the loaded model data
+function populateModelDropdown() {
+  if (!domElements.vlmModel) {
+    log('Error: VLM model element not found when populating dropdown');
+    return;
+  }
+  
+  if (!MODELS_DATA || !MODELS_DATA.length) {
+    log('Error: No model data available when populating dropdown');
+    return;
+  }
+  
+  log('Populating model dropdown with', MODELS_DATA.length, 'models');
+  
+  // Clear existing options
+  domElements.vlmModel.innerHTML = '';
+  
+  // Group models by free/paid status
+  const freeModels = MODELS_DATA.filter(model => model.free);
+  const paidModels = MODELS_DATA.filter(model => !model.free);
+  
+  log('Found', freeModels.length, 'free models and', paidModels.length, 'paid models');
+  
+  // Add free models first
+  if (freeModels.length > 0) {
+    const freeOptGroup = document.createElement('optgroup');
+    freeOptGroup.label = 'Free Models';
+    
+    freeModels.forEach(model => {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = `${model.name} (${model.provider}, Free)`;
+      freeOptGroup.appendChild(option);
+    });
+    
+    domElements.vlmModel.appendChild(freeOptGroup);
+  }
+  
+  // Then add paid models
+  if (paidModels.length > 0) {
+    const paidOptGroup = document.createElement('optgroup');
+    paidOptGroup.label = 'Paid Models';
+    
+    paidModels.forEach(model => {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = `${model.name} (${model.provider}) — $${model.inputTokenCost}/M input, $${model.outputTokenCost}/M output`;
+      option.title = model.description;
+      paidOptGroup.appendChild(option);
+    });
+    
+    domElements.vlmModel.appendChild(paidOptGroup);
+  }
+  
+  // Try to set the previously saved model if available
+  try {
+    const settings = loadSettings();
+    const savedModel = settings?.vlmModel || 'moonshotai/kimi-vl-a3b-thinking:free';
+    log('Setting model from saved settings:', savedModel);
+    
+    if (domElements.vlmModel.querySelector(`option[value="${savedModel}"]`)) {
+      domElements.vlmModel.value = savedModel;
+      log('Successfully set saved model:', savedModel);
+    } else {
+      log('Saved model not found in options, using default');
+      // Set default to first free model if available
+      if (freeModels.length > 0) {
+        domElements.vlmModel.value = freeModels[0].id;
+      }
+    }
+  } catch (error) {
+    log('Error setting saved model:', error);
+  }
+  
+  // Manually trigger change event to update cost estimate
+  log('Triggering change event on model dropdown');
+  domElements.vlmModel.dispatchEvent(new Event('change'));
+}
 
 // Cache DOM elements for faster access
 function cacheElements() {
@@ -111,6 +245,8 @@ function cacheElements() {
   domElements.dimensionsText = document.getElementById('dimensionsText');
   domElements.pixelsText = document.getElementById('pixelsText');
   domElements.costText = document.getElementById('costText');
+  domElements.imageInputCostText = document.getElementById('imageInputCostText');
+  domElements.outputCostText = document.getElementById('outputCostText');
   domElements.vlmModel = document.getElementById('vlmModel');
   domElements.promptText = document.getElementById('promptText');
   domElements.analyzeImage = document.getElementById('analyzeImage');
@@ -181,6 +317,9 @@ function initUI() {
       switchTab(tabId);
     });
   });
+  
+  // Populate model dropdown from data
+  populateModelDropdown();
   
   // Load any saved settings
   loadSettings();
@@ -580,6 +719,33 @@ function attachEventListeners() {
       });
     }
   });
+
+  // VLM model change event
+  if (domElements.vlmModel) {
+    domElements.vlmModel.addEventListener('change', () => {
+      // Save the setting
+      saveSettings();
+      
+      // Log the model change
+      log('VLM model changed to:', domElements.vlmModel.value);
+      
+      // Make sure the analyze button is enabled if there's a captured image
+      if (capturedImage && domElements.analyzeImage) {
+        domElements.analyzeImage.disabled = false;
+      }
+      
+      // Recalculate costs if we have pixels data
+      if (pixelCounter.total > 0) {
+        // Call a function to recalculate and update costs
+        updateCostEstimate();
+      } else {
+        // Update the default cost estimate
+        updateDefaultCostEstimate();
+      }
+    });
+  } else {
+    log('Error: VLM model element not found when attaching event listener');
+  }
 }
 
 // Handle messages from background
@@ -773,232 +939,154 @@ function handleAreaSelected(data) {
 
 // Handle analyze image button click
 function handleAnalyzeImage() {
-  const imageToAnalyze = capturedImage;
-
-  log('handleAnalyzeImage called', { 
-    hasCapturedImage: !!imageToAnalyze,
-    hasDataUrl: imageToAnalyze?.dataUrl ? true : false,
-    dataUrlLength: imageToAnalyze?.dataUrl?.length || 0
-  });
-
-  // Check if API key is set
+  const prompt = domElements.promptText ? domElements.promptText.value.trim() : '';
+  
+  if (!prompt) {
+    updateStatus(STATUS.WARNING, 'Please enter a prompt first');
+    return;
+  }
+  
+  if (!capturedImage || !capturedImage.dataUrl) {
+    updateStatus(STATUS.WARNING, 'No image captured yet');
+    return;
+  }
+  
+  // Disable the button while processing
+  if (domElements.analyzeImage) {
+    domElements.analyzeImage.disabled = true;
+  }
+  
+  updateStatus(STATUS.PROCESSING, 'Analyzing image...');
+  
+  // Get the selected model
+  const modelId = domElements.vlmModel ? domElements.vlmModel.value : DEFAULT_SETTINGS.vlmModel;
+  
+  // Create the payload object in the format expected by the background script
+  const payload = {
+    model: modelId,
+    prompt: prompt,
+    imageDataUrl: capturedImage.dataUrl
+  };
+  
+  // Prepare metadata object
+  const metadata = {
+    prompt: prompt,
+    timestamp: new Date().toISOString(),
+    sessionId: currentSession?.id || null,
+    isMonitoring: false,
+    conversationMode: false,
+    imageSize: pixelCounter.total > 0 ? pixelCounter : null
+  };
+  
+  // Get API key from settings
   chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (result) => {
     const settings = result[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
     const apiKey = settings.apiKey?.trim();
     
     if (!apiKey) {
       updateStatus(STATUS.WARNING, 'API key not set. Please enter your API key.');
-      
-      // Highlight the API key section
-      document.querySelector('.api-key-section').classList.add('border-warning');
-      setTimeout(() => {
-        document.querySelector('.api-key-section').classList.remove('border-warning');
-      }, 3000);
-      
+      // Re-enable the button
+      if (domElements.analyzeImage) {
+        domElements.analyzeImage.disabled = false;
+      }
       return;
     }
     
-    // Continue with image validation and analysis
-    continueImageAnalysis(imageToAnalyze);
-  });
-}
-
-// Handle the actual image analysis after API key check
-function continueImageAnalysis(imageToAnalyze) {
-  if (!imageToAnalyze?.dataUrl) {
-    updateStatus(STATUS.WARNING, 'No captured image available');
-    // Try to get the image from background state as a last resort
-    chrome.runtime.sendMessage({ action: 'getCurrentState' }, (response) => {
-      if (response?.state?.capturedImage?.dataUrl) {
-        log('Retrieved capturedImage from background state', {
-          dataUrlLength: response.state.capturedImage.dataUrl.length
-        });
-        // Use the image from background state
-        capturedImage = response.state.capturedImage;
-        // Now try analyzing again
-        setTimeout(handleAnalyzeImage, 100);
-      } else {
-        log('No captured image available in background state either');
+    // Send message to background script
+    try {
+      log('Sending image for analysis', { prompt, modelId, payloadSize: capturedImage.dataUrl.length });
+      
+      // Clear previous response if any
+      if (domElements.responseContainer) {
+        domElements.responseContainer.style.display = 'none';
       }
-    });
-    return;
-  }
-
-  const prompt = domElements.promptText.value.trim();
-  if (!prompt) {
-    updateStatus(STATUS.WARNING, 'Please enter a prompt');
-    return;
-  }
-
-  updateStatus(STATUS.PROCESSING, 'Preparing analysis...');
-
-  // Disable analyze button
-  domElements.analyzeImage.disabled = true;
-
-  log('Sending image for analysis', { promptLength: prompt.length });
-  // We have a captured image, analyze it directly
-  sendImageForAnalysis(imageToAnalyze, prompt);
-}
-
-// Send image for analysis to the VLM API (sends message to background)
-function sendImageForAnalysis(imageData, prompt) {
-  updateStatus(STATUS.PROCESSING, 'Sending to API...');
-
-  // Prepare API request
-  const settings = saveSettings(); // Ensure latest settings are used
-  
-  // Check if API key is set
-  const apiKey = settings.apiKey?.trim();
-  if (!apiKey) {
-    updateStatus(STATUS.WARNING, 'API key not set. Please enter your API key.');
-    
-    // Highlight the API key section
-    document.querySelector('.api-key-section').classList.add('border-warning');
-    setTimeout(() => {
-      document.querySelector('.api-key-section').classList.remove('border-warning');
-    }, 3000);
-    
-    // Re-enable analyze button
-    if (domElements.analyzeImage) {
-      domElements.analyzeImage.disabled = false;
-    }
-    
-    return;
-  }
-
-  const modelId = settings.vlmModel;
-
-  // Estimate pixel count from image data if not available
-  let imageSize = pixelCounter.total > 0 ? pixelCounter : { width: 0, height: 0, total: 0 };
-
-  // Construct the payload (simplified, background handles details)
-  let payload = {
-      model: modelId,
-      prompt: prompt,
-      imageDataUrl: imageData.dataUrl
-  };
-
-  // Send to background script to handle the API request construction and call
-  chrome.runtime.sendMessage({
-    action: 'analyzeImage',
-    payload: payload,
-    apiKey: apiKey,
-    metadata: {
-      prompt: prompt,
-      imageSize: imageSize, // Send estimated size
-      timestamp: new Date().toISOString(),
-      sessionId: currentSession?.id || null
-    }
-  }, (response) => {
-    if (response && response.success) {
-      log('API analysis request sent successfully');
-    } else {
-      updateStatus(STATUS.ERROR, response?.error || 'API request failed');
-      domElements.analyzeImage.disabled = false;
-      log('API analysis request failed', response?.error);
+      
+      if (domElements.responseText) {
+        domElements.responseText.innerHTML = '';
+      }
+      
+      // Send message to background script with format it expects
+      chrome.runtime.sendMessage({
+        action: 'analyzeImage',
+        payload: payload,
+        apiKey: apiKey,
+        metadata: metadata
+      }, response => {
+        if (chrome.runtime.lastError) {
+          log('Error sending message:', chrome.runtime.lastError);
+          updateStatus(STATUS.ERROR, 'Failed to send analysis request');
+          
+          // Re-enable the button on error
+          if (domElements.analyzeImage) {
+            domElements.analyzeImage.disabled = false;
+          }
+        }
+      });
+    } catch (error) {
+      log('Error in handleAnalyzeImage:', error);
+      updateStatus(STATUS.ERROR, 'Analysis failed');
+      
+      // Re-enable the button on error
+      if (domElements.analyzeImage) {
+        domElements.analyzeImage.disabled = false;
+      }
     }
   });
 }
 
 // Handle capture complete from content or background script
 function handleCaptureComplete(data, shouldAnalyze = true) {
-  log('Capture complete received in popup', { 
-    hasData: !!data, 
-    hasDataUrl: data && !!data.dataUrl,
-    dataUrlLength: data?.dataUrl?.length || 0,
-    timestamp: data?.timestamp 
-  });
+  log('Capture complete', data);
   
-  if (!data) {
-    log('Error: Capture complete message received without data');
-    updateStatus(STATUS.ERROR, 'Capture failed: No image data received');
+  if (!data || !data.dataUrl) {
+    updateStatus(STATUS.ERROR, 'Capture failed');
     return;
   }
   
-  if (!data.dataUrl || data.dataUrl.length < 100) { // Simple validation
-    log('Error: Capture complete message received with invalid image data', { 
-      dataUrlLength: data?.dataUrl?.length || 0 
-    });
-    updateStatus(STATUS.ERROR, 'Capture failed: Invalid image data');
-    return;
-  }
+  // Store captured image
+  capturedImage = {
+    dataUrl: data.dataUrl,
+    timestamp: new Date().toISOString()
+  };
   
-  // Validate that the dataUrl starts with the expected prefix
-  if (!data.dataUrl.startsWith('data:image/')) {
-    log('Error: Capture complete received invalid data URL format');
-    updateStatus(STATUS.ERROR, 'Capture failed: Invalid image format');
-    return;
-  }
+  // Update status
+  updateStatus(STATUS.ACTIVE, 'Image captured');
   
-  // Store the captured image data { dataUrl, timestamp }
-  capturedImage = data; 
-  
-  // Update UI with the image
-  if (domElements.previewContainer) {
-    domElements.previewContainer.style.display = 'block';
-  }
-  
-  // Hide the response container if visible
-  if (domElements.responseContainer) {
-    domElements.responseContainer.style.display = 'none';
-  }
-  
-  if (domElements.previewImage) {
-    // Set the src and add an onload handler to verify image loads properly
-    domElements.previewImage.onload = function() {
-      log('Preview image loaded successfully');
-      updateStatus(STATUS.ACTIVE, 'Image captured and ready for analysis');
-      
-      // Show image dimensions if available
-      if (this.naturalWidth && this.naturalHeight) {
-        log(`Image dimensions: ${this.naturalWidth} x ${this.naturalHeight}`);
-        // Optionally show dimensions in UI
-      }
-      
-      // Check if we're in auto test mode
-      const inAutoTestMode = localStorage.getItem('autoTestMode') === 'true';
-      if (inAutoTestMode) {
-        localStorage.removeItem('autoTestMode'); // Clear the flag
-        log('Auto test mode detected - automatically analyzing image');
-        setTimeout(() => {
-          handleAnalyzeImage();
-        }, 500); // Short delay to let UI update
-      }
-    };
-    
-    domElements.previewImage.onerror = function() {
-      log('Error loading preview image', { dataUrlLength: data.dataUrl.length });
-      updateStatus(STATUS.ERROR, 'Error displaying captured image');
-      // Try to recover by falling back to a request for current state
-      requestCurrentState();
-    };
-    
-    // Actually set the image src
-    try {
-      domElements.previewImage.src = data.dataUrl;
-    } catch (err) {
-      log('Exception setting image src:', err);
-      updateStatus(STATUS.ERROR, 'Error displaying image');
-      return;
-    }
-  }
-  
-  // Hide selection info once we have an image
-  if (domElements.selectionInfo) {
-    domElements.selectionInfo.style.display = 'none';
-  }
+  // Show preview
+  domElements.previewContainer.style.display = 'block';
+  domElements.previewImage.src = data.dataUrl;
   
   // Enable analyze button
-  if (domElements.analyzeImage) {
-    domElements.analyzeImage.disabled = false;
-  }
-
-  // If this capture was triggered for analysis, proceed
-  const prompt = domElements.promptText?.value.trim();
-  if (shouldAnalyze && prompt) {
-    log('Proceeding to analyze captured image.');
-    sendImageForAnalysis(capturedImage, prompt);
-  }
+  domElements.analyzeImage.disabled = false;
+  
+  // Update pixel information
+  const img = new Image();
+  img.onload = function() {
+    // Update pixel counter
+    pixelCounter = {
+      width: this.width,
+      height: this.height,
+      total: this.width * this.height
+    };
+    
+    log('Pixel information updated:', pixelCounter);
+    
+    // Update selection info
+    if (domElements.selectionInfo) {
+      domElements.selectionInfo.style.display = 'block';
+      domElements.dimensionsText.textContent = `${pixelCounter.width} x ${pixelCounter.height} px`;
+      domElements.pixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
+    }
+    
+    // Always update cost estimate when image is loaded
+    updateCostEstimate();
+    
+    // Analyze image if requested
+    if (shouldAnalyze) {
+      handleAnalyzeImage();
+    }
+  };
+  img.src = data.dataUrl;
 }
 
 // Handle analyze complete from background script
@@ -1013,10 +1101,15 @@ function handleAnalyzeComplete(data) {
     return;
   }
   
-  // Save response and show in UI
+  // Show response in UI (don't save again - it's already saved in background)
   if (response) {
-    saveResponse(response);
+    // Response is already saved in background script, so just show it
     showResponseInUI(response);
+    
+    // Keep the analyze button enabled if we have a captured image
+    if (domElements.analyzeImage && capturedImage) {
+      domElements.analyzeImage.disabled = false;
+    }
     
     // Add to conversation history if in conversation mode
     if (currentSession && currentSession.settings?.conversationMode) {
@@ -1049,6 +1142,11 @@ function handleAnalyzeComplete(data) {
       startCaptureCountdown();
     } else {
       updateStatus(STATUS.IDLE, 'Analysis complete');
+    }
+    
+    // Refresh history if we're on that tab
+    if (document.querySelector('#history-tab').getAttribute('aria-selected') === 'true') {
+      loadHistoryData();
     }
   }
 }
@@ -1857,29 +1955,20 @@ function saveResponse(response) {
 
 // Show response in UI
 function showResponseInUI(response) {
-  if (!response) return;
+  log('Showing response in UI', { id: response.id });
   
-  log('Showing response in UI', { responseId: response.id });
-  
-  // Display the response directly in the main UI
-  if (domElements.responseContainer && domElements.responseText) {
-    // Format the response text
-    const formattedText = response.responseText || 'No response text';
-    
-    // Show the response container
+  if (domElements.responseContainer) {
     domElements.responseContainer.style.display = 'block';
-    
-    // Set the response text
-    domElements.responseText.textContent = formattedText;
-    
-    // Scroll to make sure response is visible
-    domElements.responseContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  } else {
-    log('Response container elements not found in DOM');
   }
   
-  // For viewing history details, we'll still need a popup
-  // But primary response viewing is now in the main UI
+  if (domElements.responseText) {
+    domElements.responseText.innerHTML = response.responseText.replace(/\n/g, '<br>');
+  }
+  
+  // Keep the analyze button enabled if there's a captured image available
+  if (capturedImage && domElements.analyzeImage) {
+    domElements.analyzeImage.disabled = false;
+  }
 }
 
 // Update storage usage display
@@ -2260,10 +2349,8 @@ function handleTestCapture() {
           domElements.dimensionsText.textContent = `${pixelCounter.width} x ${pixelCounter.height} px`;
           domElements.pixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
           
-          // Calculate cost estimate
-          const costPerPixel = COST_ESTIMATES[domElements.vlmModel.value] || 0.00001;
-          const estimatedCost = (pixelCounter.total / 1000) * costPerPixel;
-          domElements.costText.textContent = `$${estimatedCost.toFixed(6)}`;
+          // Calculate and update cost estimate
+          updateCostEstimate();
           
           // Enable analyze button
           domElements.analyzeImage.disabled = false;
@@ -2920,4 +3007,233 @@ function handleExportAllHistory() {
     
     log(`Exported ${responses.length} responses${sessionId !== 'all' ? ' for session ' + sessionId : ''}`);
   });
+}
+
+// Function to update cost estimate based on current model and image size
+function updateCostEstimate() {
+  if (!pixelCounter.total) return;
+  
+  const modelId = domElements.vlmModel.value;
+  log('Updating cost estimate for model:', modelId);
+  
+  if (!COST_ESTIMATES[modelId]) {
+    log('Warning: No cost data found for model:', modelId);
+    log('Available cost estimates:', Object.keys(COST_ESTIMATES));
+  }
+  
+  const modelCosts = COST_ESTIMATES[modelId] || { inputCost: 0.00001, outputCost: 0.00002, imageInputCost: 0.005, isPixelBased: false };
+  
+  // Log the model costs being used
+  log('Using model costs:', modelCosts);
+  
+  // Calculate image input cost based on pricing model
+  let imageInputCost;
+  if (modelCosts.isPixelBased) {
+    // If pixel-based pricing, multiply by total pixels
+    imageInputCost = pixelCounter.total * modelCosts.imageInputCost;
+    log('Using pixel-based pricing: ' + pixelCounter.total + ' pixels at $' + modelCosts.imageInputCost + ' per pixel');
+  } else {
+    // If per-image pricing, use the flat rate
+    imageInputCost = modelCosts.imageInputCost;
+    log('Using per-image pricing: $' + modelCosts.imageInputCost + ' per image');
+  }
+  
+  // Estimate output tokens - typically 250 tokens of output per analysis
+  const estimatedOutputTokens = 250;
+  const outputCost = estimatedOutputTokens * modelCosts.outputCost;
+  
+  // Calculate total cost
+  const totalCost = imageInputCost + outputCost;
+  
+  // Log the calculated costs
+  log('Calculated costs:', { imageInputCost, outputCost, totalCost });
+  
+  // Update dimension and pixel info in both tabs
+  // Update in Capture tab
+  if (domElements.dimensionsText) {
+    domElements.dimensionsText.textContent = `${pixelCounter.width} x ${pixelCounter.height} px`;
+  }
+  if (domElements.pixelsText) {
+    domElements.pixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
+  }
+  
+  // Update in Monitor tab
+  if (domElements.monitorDimensionsText) {
+    domElements.monitorDimensionsText.textContent = `${pixelCounter.width} x ${pixelCounter.height} px`;
+  }
+  if (domElements.monitorPixelsText) {
+    domElements.monitorPixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
+  }
+  
+  // Update cost displays
+  // Original cost display in selection info
+  if (domElements.costText) {
+    domElements.costText.textContent = `$${totalCost.toFixed(6)}`;
+    domElements.imageInputCostText.textContent = `$${imageInputCost.toFixed(6)}`;
+    domElements.outputCostText.textContent = `$${outputCost.toFixed(6)}`;
+    domElements.costText.title = `Image Input: $${imageInputCost.toFixed(6)}\nText Output: $${outputCost.toFixed(6)}`;
+  } else {
+    log('Warning: costText element not found');
+  }
+  
+  // Update cost in Capture tab
+  if (domElements.captureCostText) {
+    domElements.captureCostText.textContent = `$${totalCost.toFixed(6)}`;
+    domElements.captureImageInputCostText.textContent = `$${imageInputCost.toFixed(6)}`;
+    domElements.captureOutputCostText.textContent = `$${outputCost.toFixed(6)}`;
+  } else {
+    log('Warning: captureCostText element not found');
+  }
+  
+  // Update cost in Monitor tab
+  if (domElements.monitorCostText) {
+    domElements.monitorCostText.textContent = `$${totalCost.toFixed(6)}`;
+    domElements.monitorImageInputCostText.textContent = `$${imageInputCost.toFixed(6)}`;
+    domElements.monitorOutputCostText.textContent = `$${outputCost.toFixed(6)}`;
+  } else {
+    log('Warning: monitorCostText element not found');
+  }
+  
+  return totalCost;
+}
+
+// New function to show default cost estimate based on model when no image is captured yet
+function updateDefaultCostEstimate() {
+  if (!pixelCounter.width || !pixelCounter.height) {
+    return;
+  }
+  
+  const modelId = domElements.vlmModel.value;
+  const modelCosts = COST_ESTIMATES[modelId] || { inputCost: 0.00001, outputCost: 0.00002, imageInputCost: 0.005, isPixelBased: false };
+  
+  // Calculate image input cost based on pricing model
+  let imageInputCost;
+  if (modelCosts.isPixelBased) {
+    // If pixel-based pricing, multiply by total pixels
+    imageInputCost = pixelCounter.total * modelCosts.imageInputCost;
+  } else {
+    // If per-image pricing, use the flat rate
+    imageInputCost = modelCosts.imageInputCost;
+  }
+  
+  // Estimate output tokens - typically 250 tokens of output per analysis
+  const estimatedOutputTokens = 250;
+  const outputCost = estimatedOutputTokens * modelCosts.outputCost;
+  
+  // Calculate total cost
+  const totalCost = imageInputCost + outputCost;
+  
+  // Update dimension and pixel info in both tabs
+  // Update in Capture tab
+  if (domElements.dimensionsText) {
+    domElements.dimensionsText.textContent = `${pixelCounter.width} x ${pixelCounter.height} px`;
+  }
+  if (domElements.pixelsText) {
+    domElements.pixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
+  }
+  
+  // Update in Monitor tab
+  if (domElements.monitorDimensionsText) {
+    domElements.monitorDimensionsText.textContent = `${pixelCounter.width} x ${pixelCounter.height} px`;
+  }
+  if (domElements.monitorPixelsText) {
+    domElements.monitorPixelsText.textContent = `${pixelCounter.total.toLocaleString()} px`;
+  }
+  
+  // Update cost displays
+  // Original cost display in selection info
+  if (domElements.costText) {
+    domElements.costText.textContent = `$${totalCost.toFixed(6)}`;
+    domElements.imageInputCostText.textContent = `$${imageInputCost.toFixed(6)}`;
+    domElements.outputCostText.textContent = `$${outputCost.toFixed(6)}`;
+    domElements.costText.title = `Image Input: $${imageInputCost.toFixed(6)}\nText Output: $${outputCost.toFixed(6)}`;
+  }
+  
+  // Update cost in Capture tab
+  if (domElements.captureCostText) {
+    domElements.captureCostText.textContent = `$${totalCost.toFixed(6)}`;
+    domElements.captureImageInputCostText.textContent = `$${imageInputCost.toFixed(6)}`;
+    domElements.captureOutputCostText.textContent = `$${outputCost.toFixed(6)}`;
+  }
+  
+  // Update cost in Monitor tab
+  if (domElements.monitorCostText) {
+    domElements.monitorCostText.textContent = `$${totalCost.toFixed(6)}`;
+    domElements.monitorImageInputCostText.textContent = `$${imageInputCost.toFixed(6)}`;
+    domElements.monitorOutputCostText.textContent = `$${outputCost.toFixed(6)}`;
+  }
+}
+
+// Initialize DOM elements after document is loaded
+function initializeDOMElements() {
+  // Capture Tab Elements
+  domElements.captureViewport = document.getElementById('captureViewport');
+  domElements.captureArea = document.getElementById('captureArea');
+  domElements.vlmModel = document.getElementById('vlmModel');
+  domElements.promptText = document.getElementById('promptText');
+  domElements.analyzeImage = document.getElementById('analyzeImage');
+  domElements.previewContainer = document.getElementById('previewContainer');
+  domElements.previewImage = document.getElementById('previewImage');
+  domElements.responseContainer = document.getElementById('responseContainer');
+  domElements.responseText = document.getElementById('responseText');
+  domElements.selectionInfo = document.getElementById('selectionInfo');
+  domElements.dimensionsText = document.getElementById('dimensionsText');
+  domElements.pixelsText = document.getElementById('pixelsText');
+  domElements.costText = document.getElementById('costText');
+  domElements.imageInputCostText = document.getElementById('imageInputCostText');
+  domElements.outputCostText = document.getElementById('outputCostText');
+  
+  // New Cost Estimate Elements - Capture Tab
+  domElements.captureCostText = document.getElementById('captureCostText');
+  domElements.captureImageInputCostText = document.getElementById('captureImageInputCostText');
+  domElements.captureOutputCostText = document.getElementById('captureOutputCostText');
+  
+  // New Cost Estimate Elements - Monitor Tab
+  domElements.monitorDimensionsText = document.getElementById('monitorDimensionsText');
+  domElements.monitorPixelsText = document.getElementById('monitorPixelsText');
+  domElements.monitorCostText = document.getElementById('monitorCostText');
+  domElements.monitorImageInputCostText = document.getElementById('monitorImageInputCostText');
+  domElements.monitorOutputCostText = document.getElementById('monitorOutputCostText');
+  
+  // Monitor Tab Elements
+  // ... existing code ...
+}
+
+// Function to initialize the extension
+async function initialize() {
+  log('Initializing extension...');
+
+  try {
+    // Initialize DOM elements first
+    initializeDOMElements();
+    log('DOM elements initialized');
+    
+    // Load model data
+    await loadModelData();
+    log('Model data loaded');
+    
+    // Load saved settings
+    await loadSettings();
+    log('Settings loaded');
+    
+    // Populate model dropdown
+    populateModelDropdown();
+    log('Model dropdown populated');
+    
+    // Initialize cost estimates with default values
+    updateDefaultCostEstimate();
+    log('Default cost estimates calculated');
+    
+    // Attach event listeners
+    attachEventListeners();
+    log('Event listeners attached');
+    
+    // Add the state update timer
+    stateUpdateTimer = setInterval(updateStateDisplay, 1000);
+    
+    log('Extension initialized successfully');
+  } catch (error) {
+    log('Error during initialization', error);
+    updateStatus(STATUS.ERROR, 'Initialization error');
+  }
 }

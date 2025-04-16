@@ -244,7 +244,7 @@ chrome.runtime.onMessage.addListener((req, sender, res) => {
       }
     }
     
-    // Handle messages from background script for AI Screen Watcher
+    // Handle messages from background script for Screen Scoutr
     if (req.action === 'startSelection') {
       console.log('AI Watcher: Received startSelection message');
       const success = startSelection();

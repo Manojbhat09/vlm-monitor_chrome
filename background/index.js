@@ -14,7 +14,7 @@ const NEXT_CAPTURE_ALARM_NAME = 'ai_watcher_next_capture';
 // Default settings
 const DEFAULT_SETTINGS = {
   captureMethod: 'crop',
-  vlmModel: 'anthropic/claude-3-haiku',
+  vlmModel: 'moonshotai/kimi-vl-a3b-thinking:free',
   monitorInterval: 30,
   enableNotifications: true,
   autoBackoff: true,
@@ -1077,7 +1077,7 @@ function analyzeImage(payload, apiKey, metadata) {
       chrome.storage.sync.get([STORAGE_KEYS.SETTINGS], (res) => {
           const settings = res[STORAGE_KEYS.SETTINGS] || DEFAULT_SETTINGS;
           if (settings.enableNotifications) {
-              showNotification('AI Screen Watcher', `Analysis complete: ${responseText.substring(0, 50)}...`);
+              showNotification('Screen Scoutr', `Analysis complete: ${responseText.substring(0, 50)}...`);
           }
       });
     })
@@ -1151,7 +1151,7 @@ async function makeApiRequest(endpoint, payload, apiKey) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
         'HTTP-Referer': chrome.runtime.getManifest().homepage_url,
-        'X-Title': 'AI Screen Watcher'
+        'X-Title': 'Screen Scoutr'
       },
       body: JSON.stringify(payload)
     });

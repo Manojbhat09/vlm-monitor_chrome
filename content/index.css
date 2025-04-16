@@ -16,7 +16,7 @@ img#fake-image {
   z-index: 2147483647 !important;
 }
 
-/* Content styles for AI Screen Watcher */
+/* Content styles for Screen Scoutr */
 .ai-watcher-selection-box {
   position: fixed;
   background-color: rgba(66, 133, 244, 0.2);

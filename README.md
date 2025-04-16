@@ -1,177 +1,262 @@
+# Screen Scoutr: Monitor & Analysis
 
-# Screenshot Capture / Browser Extension
+> **Transform your browser from a simple viewer to an intelligent guardian of your digital experience.**
 
-**Install: [Chrome]** / **[Edge]** / **[Opera]**  / **[Brave]** / **[Chromium]** / **[Vivaldi]**
+**Install: [Chrome]** 
+<!-- / **[Edge]** / **[Opera]** / **[Brave]** / **[Chromium]** / **[Vivaldi]** -->
 
-# Features
+![Screen Scoutr Logo](icons/default/128x128.png)
 
-- Secure by design
-- Capture Viewport
-- Crop and Save (automatic save)
-- Crop and Wait (manual save)
-- Configurable Keyboard Shortcut
-- Save screenshot as PNG or JPG image file
-- Copy screenshot to clipboard as Data URL String or Binary Image
-- Preserve or downscale screenshot size on HDPI displays like Retina
-- Unique screenshot date/time file name
-- No special permissions required
-- Free and Open Source
+## 🔥 Features
 
-# Options
+- 📸 **Smart Screen Capture** - Capture exactly what you need with precision
+- 🧠 **AI-Powered Analysis** - Automatically detect and classify screen content
+- 🔔 **Customizable Alerts** - Get notified when specific content is detected
+- 🔒 **Privacy-First Design** - All processing happens locally in your browser
+- ⚙️ **Flexible Configuration** - Tailor the extension to your specific needs
+- 🎯 **Multiple Capture Methods** - Viewport, crop & save, or crop & wait
+- 🖼️ **Versatile Output Options** - Save to PNG/JPG or copy to clipboard
+- 📱 **HDPI Display Support** - Perfect for high-resolution displays
+- ⚡ **Keyboard Shortcuts** - Boost your productivity with quick commands
+- 🌐 **Open Source** - Free, transparent, and community-driven
 
-1. Pin the extension to your browser toolbar
+## What Makes Screen Scoutr Special?
+
+Screen Scoutr goes beyond simple screenshot functionality by incorporating intelligent visual analysis. Whether you're monitoring for specific UI elements, tracking visual changes over time, or setting up alerts for particular content patterns, Screen Scoutr leverages vision language models (VLMs) to bring context-aware intelligence to your browsing experience.
+
+## Table of Contents
+
+- [Getting Started](#getting-started)
+- [How to Use](#how-to-use)
+- [Capture Methods](#capture-methods)
+- [Content Analysis](#content-analysis)
+- [Alert Configuration](#alert-configuration)
+- [Image Format](#image-format)
+- [Screenshot Scaling](#screenshot-scaling)
+- [Save Options](#save-options)
+- [Keyboard Shortcuts](#keyboard-shortcuts)
+- [Save Location](#save-location)
+- [Known Limitations](#known-limitations)
+- [Installation Options](#installation-options)
+- [License](#license)
+
+## Getting Started
+
+1. Pin the extension to your browser toolbar for easy access
 2. Click on the extension button using your **Right** Mouse Button
 3. Select `Options` from the context menu
+4. Configure your preferred capture, analysis, and alert settings
 
-# Table of Contents
+## How to Use
 
-- **[Capture Method](#capture-method)**
-- **[Image Format](#image-format)**
-- **[Screenshot Scaling](#screenshot-scaling)**
-- **[Save Format](#save-format)**
-- **[Keyboard Shortcut](#keyboard-shortcut)**
-- **[Save Location](#save-location)**
-- **[Caveats](#caveats)**
+### Setting Up API Access
 
-# Capture Method
+1. **API Key Configuration**:
+   - Navigate to the Settings tab in the extension
+   - Enter your API key in the designated field
+   - Without an API key, the VLM analysis features will not be available
 
-#### **`Crop and Save`**
+2. **Model Selection**:
+   - Choose from the dropdown menu of available models
+   - Free models from Open Router are included by default
+   - Pro tip: If you need a specific model that's not listed, use the "Request New Model" button
+   - The model list is regularly updated with new options
 
-1. Activate the extension by using the [keyboard shortcut](#keyboard-shortcut) or by clicking on the extension button
-2. Hold down your left mouse button anywhere on the page and drag your mouse in any direction
-3. Release the mouse button when you are ready, the selected area will be cropped
+### Single Image Analysis
 
-#### **`Crop and Wait`**
+1. **Capture Screen Content**:
+   - Ensure you're on the tab you want to analyze
+   - Click "Select Area" to manually define a region, or
+   - Click "Capture Viewport" to automatically capture the entire visible area
 
-1. Activate the extension by using the [keyboard shortcut](#keyboard-shortcut) or by clicking on the extension button
-2. Hold down your left mouse button anywhere on the page and drag your mouse in any direction
-3. Adjust the selected are to crop and/or move it around
-4. When you are ready activate the extension again by using the [keyboard shortcut](#keyboard-shortcut) or by clicking on the extension button, the selected area will be cropped
+2. **Add Context (Optional)**:
+   - In the provided text field, enter any prompts or questions
+   - Leave blank if you want the VLM to analyze without specific guidance
 
-#### **`Capture Viewport`**
+3. **Analyze the Image**:
+   - Click the "Analyze Image" button
+   - After processing (timing varies by model), results will appear below the image preview
 
-1. Activate the extension by using the [keyboard shortcut](#keyboard-shortcut) or by clicking on the extension button
-2. The visible area of the screen will be captured
+### Continuous Monitoring
 
-# Image Format
+1. **Setup Monitoring**:
+   - Navigate to the "Monitor" tab in the extension
+   - Select the monitoring interval (minimum: 10 seconds)
+   - Enter your monitoring prompt (e.g., "Alert me if this value changes")
 
-- **`PNG`** - better image quality but larger file size. Best suited for cropping and capturing simple web pages
+2. **Start Monitoring**:
+   - Click "Start Monitoring" to begin the automated analysis
+   - The extension will capture and analyze the selected screen area at your specified interval
 
-- **`JPG`** - smaller file size with slightly lower image quality. Useful when capturing the entire screen area especially with lots of images on screen or when capturing still shots of videos. The quality of the JPEG can be adjusted from 100 to 0 (highest to lowest)
+3. **Control Options**:
+   - "Pause Monitoring" - Temporarily halt the process
+   - "Stop Monitoring" - End the current monitoring session completely
 
-# Screenshot Scaling
+### Viewing History
 
-- **`Preserve scaling`** - the screenshot will be saved with the page scaling that you are seeing on the screen
+1. Access the "History" tab to review all previous analyses
+2. Results are organized chronologically with timestamps
+3. Filter or search through your history to find specific results
 
-- **`Downscale to actual size`** - on HDPI displays like Retina or zoomed pages the screenshot will be downscaled to the original page size
+### Important Usage Notes
 
-# Save Format
+- **Window & Tab Management**:
+  - The extension captures the **active tab** in the **active window**
+  - If you switch tabs within the monitored window, the new active tab will be captured
+  - For uninterrupted monitoring, keep the target tab active in its window
+  - You can open a new browser window for other work while monitoring continues
 
-- **`To File`** - save the screenshot to a file. Depending on your [download preferences](#save-location) you will be either prompted to save the file or the file will be saved automatically in your download folder
+- **API Quota Limitations**:
+  - Free Open Router accounts: 50 requests per day per API key
+  - For additional usage, you can create new accounts with new API keys
+  - Unlimited quota available for Pro users (subject to rate limits)
 
-- **`To Clipboard`** - copy the screenshot to your clipboard:
-  - **`Data URL String`** - the screenshot will be copied to the clipboard as Data URL String
-  - **`Binary Image`** - the screenshot will be copied to the clipboard as raw Binary Image
-  - **`Confirmation Dialog`** - toggle the confirmation dialog on copy to clipboard
+- **Best Practices**:
+  - For critical monitoring, consider using a dedicated browser window
+  - More specific prompts generally yield more useful analysis results
+  - Regular monitoring intervals (1-5 minutes) provide good coverage without excessive API usage
 
-# Keyboard Shortcut
+## Capture Methods
+
+### **`Crop and Save`**
+
+1. Activate the extension using your [keyboard shortcut](#keyboard-shortcuts) or by clicking the extension button
+2. Hold down your left mouse button anywhere on the page and drag to select your area
+3. Release the mouse button when ready - the selected area will be captured and saved
+
+### **`Crop and Wait`**
+
+1. Activate the extension using your [keyboard shortcut](#keyboard-shortcuts) or by clicking the extension button
+2. Hold down your left mouse button anywhere on the page and drag to create a selection
+3. Fine-tune the selected area by adjusting its position and size
+4. When ready, activate the extension again to capture and save the selection
+
+### **`Capture Viewport`**
+
+1. Activate the extension using your [keyboard shortcut](#keyboard-shortcuts) or by clicking the extension button
+2. The entire visible area of the screen will be instantly captured
+
+## Content Analysis
+
+Screen Scoutr leverages cutting-edge vision language models to analyze captured content:
+
+- **`Pattern Recognition`** - Identify specific visual elements and patterns
+- **`Content Classification`** - Automatically categorize and tag screen content
+- **`Text Extraction`** - Pull out relevant text from visual elements
+- **`Change Detection`** - Identify differences between captures over time
+- **`Custom Detectors`** - Set up specialized monitors for your specific needs
+
+## Alert Configuration
+
+Configure personalized alerts based on what matters to you:
+
+- **`Content-Based Alerts`** - Get notified when specific content appears
+- **`Pattern Matching`** - Set triggers for visual or textual patterns
+- **`Threshold Controls`** - Adjust sensitivity and confidence thresholds
+- **`Alert Channels`** - Choose between browser notifications, sounds, or visual indicators
+- **`Alert History`** - Review past detections and alerts
+
+## Image Format
+
+- **`PNG`** - Superior image quality with lossless compression. Ideal for screenshots with text, UI elements, or when quality is critical. Larger file size.
+
+- **`JPG`** - More efficient file size with minimal quality loss. Perfect for capturing photographs, videos, or when storage space is a concern. Adjustable quality from 100 (highest) to 0 (lowest).
+
+## Screenshot Scaling
+
+- **`Preserve scaling`** - Maintain the display scaling you see on screen, capturing exactly what you perceive.
+
+- **`Downscale to actual size`** - Automatically optimize for HDPI displays (like Retina) or zoomed pages by downscaling to original size.
+
+## Save Options
+
+- **`To File`** - Save directly to your device:
+  - Automatic saving to your [preferred location](#save-location)
+  - Manual save prompt for more control
+  - Customizable naming conventions
+
+- **`To Clipboard`** - Copy for immediate use elsewhere:
+  - **`Data URL String`** - Technical format for web development
+  - **`Binary Image`** - Ready for pasting in image editors
+  - **`Confirmation Dialog`** - Optional verification step
+
+## Keyboard Shortcuts
 
 1. Navigate to `chrome://extensions/shortcuts`
-2. Find the Screenshot Capture extension and set key combination for the `Take Screenshot` action
+2. Find Screen Scoutr and set your preferred key combination
+3. Default suggestion: `Alt+S` (customizable)
 
-# Save Location
+*Pro tip: Create different shortcuts for different capture methods through the extension settings!*
+
+## Save Location
 
 1. Navigate to `chrome://settings/downloads`
-2. Change the default download `Location`
-3. Use the `Ask where to save each file before downloading` switch to toggle the **autosaving**
+2. Set your preferred download destination
+3. Toggle `Ask where to save each file before downloading` for manual control
 
-# Caveats
+## Known Limitations
 
-The extension won't work on the following origins:
+Screen Scoutr won't function on:
 
-- chrome and extension settings pages - `chrome://` and `chrome-extension://`
-- the official chrome web store - `https://chromewebstore.google.com/`
-- your home page
+- Browser settings pages (`chrome://` and `chrome-extension://`)
+- Chrome Web Store (`https://chromewebstore.google.com/`)
+- Your designated home page
 
-To enable the extension on local `file:///` URLs:
+For local file access:
 
-1. Navigate to `chrome://extensions`
-2. Locate the Screenshot Capture extension and click on the `Details` button
-3. Make sure that the `Allow access to file URLs` switch is turned on
+1. Go to `chrome://extensions`
+2. Find Screen Scoutr and click `Details`
+3. Enable `Allow access to file URLs`
 
-Copy to clipboard:
+Clipboard considerations:
 
-- it won't work on domains served on insecure `http://` protocol, but it will work on `http://localhost`
-- when using `Capture Viewport` you will be asked by the browser to grant read access to the clipboard
-- `Capture Viewport` won't work on PDF documents, use `Crop and Save` instead and select the entire screen area
+- Requires secure contexts (HTTPS or localhost)
+- Viewport capture requires clipboard permission
+- PDF documents require the Crop and Save method
 
-# Manual Install
+## Installation Options
 
-The following instructions applies for: Chrome, Edge, Opera, Brave, Chromium and Vivaldi.
+The following options work for: Chrome, Edge, Opera, Brave, Chromium and Vivaldi.
 
-Note that in any of the following cases you won't receive any future updates automatically!
+*Note: Manual installation methods won't receive automatic updates.*
 
-## Load packed .crx
+### Web Store Installation (Recommended)
 
-1. Go to [releases] and pick a release that you want to install
-2. Download the `screenshot-capture.crx` file
-3. Navigate to `chrome://extensions`
-4. Drag and drop the `markdown-viewer.crx` file into the `chrome://extensions` page
+Click the relevant store link at the top of this page for your browser.
 
-## Load unpacked .zip
+### Manual .crx Installation
 
-1. Go to [releases] and pick a release that you want to install
-2. Download the `screenshot-capture.zip` file and extract it
-3. Navigate to `chrome://extensions`
-4. Make sure that the `Developer mode` switch is enabled
-5. Click on the `Load unpacked` button and select the extracted directory
+1. Download the latest `screen-scoutr.crx` from [releases]
+2. Navigate to `chrome://extensions`
+3. Enable Developer mode
+4. Drag and drop the file onto the extensions page
 
-## Build
+### Load Unpacked
+
+1. Download and extract `screen-scoutr.zip` from [releases]
+2. Navigate to `chrome://extensions`
+3. Enable Developer mode
+4. Click `Load unpacked` and select the extracted directory
+
+### Build From Source
 
 1. Clone this repository
-2. Execute `sh build/package.sh chrome`
-3. Navigate to `chrome://extensions`
-4. Make sure that the `Developer mode` switch is enabled
-5. Click on the `Load unpacked` button and select the cloned directory
+2. Run `sh build/package.sh chrome`
+3. Load the extension through `chrome://extensions`
 
-## Manifest v2
-
-1. Clone the [mv2] branch (Screenshot Capture v2.0)
-2. Navigate to `chrome://extensions`
-3. Make sure that the `Developer mode` switch is enabled
-4. Click on the `Load unpacked` button and select the cloned directory
-
-# License
+## License
 
 The MIT License (MIT)
 
-Copyright (c) 2014-present Simeon Velichkov <simeonvelichkov@gmail.com> (https://github.com/simov/screenshot-capture)
+Copyright (c) 2023-present Your Organization/Name
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+*Based on the original Screenshot Capture extension by Simeon Velichkov*
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+[chrome]: https://chromewebstore.google.com/detail/<coming soon>
+<!-- [edge]: https://microsoftedge.microsoft.com/addons/detail/screenshot-capture/fjmanmejbodljeaicnkgdgibdbeheela
+[opera]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
+[brave]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
+[chromium]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
+[vivaldi]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-  [chrome]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
-  [edge]: https://microsoftedge.microsoft.com/addons/detail/screenshot-capture/fjmanmejbodljeaicnkgdgibdbeheela
-  [opera]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
-  [brave]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
-  [chromium]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
-  [vivaldi]: https://chromewebstore.google.com/detail/screenshot-capture/giabbpobpebjfegnpcclkocepcgockkc
-
-  [releases]: https://github.com/simov/screenshot-capture/releases
-  [mv2]: https://github.com/simov/screenshot-capture/tree/mv2
+[releases]: https://github.com/yourusername/screen-scoutr/releases -->
