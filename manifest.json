@@ -42,7 +42,10 @@
         "/content/pixel.png",
         "/content/grid-overlay.png",
         "/vendor/bootstrap-icons/fonts/bootstrap-icons.woff2",
-        "/vendor/bootstrap-icons/fonts/bootstrap-icons.woff"
+        "/vendor/bootstrap-icons/fonts/bootstrap-icons.woff",
+        "/icons/default/icon.svg",
+        "/icons/dark/icon.svg", 
+        "/icons/light/icon.svg"
       ]
     }
   ],

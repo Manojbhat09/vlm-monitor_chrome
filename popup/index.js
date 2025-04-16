@@ -137,10 +137,13 @@ function cacheElements() {
   domElements.rateLimitCount = document.getElementById('rateLimitCount');
   
   // History tab
+  domElements.historyTabContent = document.getElementById('history');
+  domElements.historyTable = document.getElementById('historyTable');
+  domElements.historyTableBody = document.getElementById('historyTableBody');
   domElements.sessionFilter = document.getElementById('sessionFilter');
   domElements.refreshHistory = document.getElementById('refreshHistory');
   domElements.clearHistory = document.getElementById('clearHistory');
-  domElements.historyTableBody = document.getElementById('historyTableBody');
+  domElements.exportAllHistory = document.getElementById('exportAllHistory');
   
   // Dev tab
   domElements.enableDebugMode = document.getElementById('enableDebugMode');
@@ -160,6 +163,7 @@ function cacheElements() {
   domElements.refreshStorage = document.getElementById('refreshStorage');
   domElements.exportStorage = document.getElementById('exportStorage');
   domElements.clearStorage = document.getElementById('clearStorage');
+  domElements.clearAllLocalStorage = document.getElementById('clearAllLocalStorage');
   
   // Add next capture countdown timer to the domElements
   domElements.nextCaptureTimer = document.getElementById('nextCaptureTimer');
@@ -310,7 +314,7 @@ function applyState(state) {
     // Double check for captured image
     setTimeout(() => {
       chrome.runtime.sendMessage({ action: 'getCurrentState' }, (refreshResponse) => {
-        if (refreshResponse?.state?.capturedImage) {
+        if (refreshResponse?.state?.capturedImage?.dataUrl) {
           handleCaptureComplete(refreshResponse.state.capturedImage, false);
         }
       });
@@ -496,6 +500,7 @@ function attachEventListeners() {
   domElements.sessionFilter.addEventListener('change', handleFilterChange);
   domElements.refreshHistory.addEventListener('click', loadHistoryData);
   domElements.clearHistory.addEventListener('click', handleClearHistory);
+  domElements.exportAllHistory.addEventListener('click', handleExportAllHistory);
   
   // Dev tab
   domElements.enableDebugMode.addEventListener('change', saveSettings);
@@ -513,6 +518,7 @@ function attachEventListeners() {
   domElements.refreshStorage.addEventListener('click', handleRefreshStorage);
   domElements.exportStorage.addEventListener('click', handleExportStorage);
   domElements.clearStorage.addEventListener('click', handleClearStorage);
+  domElements.clearAllLocalStorage.addEventListener('click', handleClearAllLocalStorage);
   
   // Save settings when API key changes
   domElements.apiKey.addEventListener('change', saveSettings);
@@ -649,15 +655,59 @@ function handleMessages(message, sender, sendResponse) {
 function handleCaptureViewport() {
   updateStatus(STATUS.PROCESSING, 'Capturing viewport...');
   
-  chrome.runtime.sendMessage({
-    action: 'captureViewport'
-  }, (response) => {
-    if (response && response.success) {
-      log('Viewport capture initiated');
-    } else {
-      updateStatus(STATUS.ERROR, 'Failed to capture viewport');
-      log('Viewport capture failed', response?.error);
+  // Clear any existing image and UI
+  if (domElements.previewImage) {
+    domElements.previewImage.src = '';
+  }
+  
+  // Show the preview container to indicate something is happening
+  if (domElements.previewContainer) {
+    domElements.previewContainer.style.display = 'block';
+    // Optionally add a "loading" indication here
+  }
+  
+  // Query for active tab to ensure we have the proper tab information
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs || tabs.length === 0) {
+      updateStatus(STATUS.ERROR, 'Could not find active tab for capture');
+      return;
     }
+    
+    const activeTab = tabs[0];
+    
+    chrome.runtime.sendMessage({
+      action: 'captureViewport',
+      tabId: activeTab.id,
+      windowId: activeTab.windowId
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        updateStatus(STATUS.ERROR, 'Error communicating with extension: ' + chrome.runtime.lastError.message);
+        log('Viewport capture communication error', chrome.runtime.lastError);
+        return;
+      }
+      
+      if (!response) {
+        updateStatus(STATUS.ERROR, 'No response received from background');
+        log('No response received from captureViewport message');
+        return;
+      }
+      
+      if (!response.success) {
+        updateStatus(STATUS.ERROR, 'Failed to capture: ' + (response.error || 'Unknown error'));
+        log('Viewport capture failed', response.error);
+        return;
+      }
+      
+      // If we got a response with data directly, use it
+      if (response.data && response.data.dataUrl) {
+        log('Viewport capture successful with direct data');
+        handleCaptureComplete(response.data, false);
+      } else {
+        log('Viewport capture initiated, waiting for captureComplete message');
+        // The capture was initiated but the data will come in a separate message
+        // Just wait for the captureComplete message that should arrive shortly
+      }
+    });
   });
 }
 
@@ -855,16 +905,33 @@ function handleCaptureComplete(data, shouldAnalyze = true) {
   log('Capture complete received in popup', { 
     hasData: !!data, 
     hasDataUrl: data && !!data.dataUrl,
+    dataUrlLength: data?.dataUrl?.length || 0,
     timestamp: data?.timestamp 
   });
   
-  if (!data || !data.dataUrl) {
-    log('Warning: Capture complete message received without valid image data');
-    updateStatus(STATUS.WARNING, 'Capture completed but no valid image received');
+  if (!data) {
+    log('Error: Capture complete message received without data');
+    updateStatus(STATUS.ERROR, 'Capture failed: No image data received');
     return;
   }
   
-  capturedImage = data; // Store the captured image data { dataUrl, timestamp }
+  if (!data.dataUrl || data.dataUrl.length < 100) { // Simple validation
+    log('Error: Capture complete message received with invalid image data', { 
+      dataUrlLength: data?.dataUrl?.length || 0 
+    });
+    updateStatus(STATUS.ERROR, 'Capture failed: Invalid image data');
+    return;
+  }
+  
+  // Validate that the dataUrl starts with the expected prefix
+  if (!data.dataUrl.startsWith('data:image/')) {
+    log('Error: Capture complete received invalid data URL format');
+    updateStatus(STATUS.ERROR, 'Capture failed: Invalid image format');
+    return;
+  }
+  
+  // Store the captured image data { dataUrl, timestamp }
+  capturedImage = data; 
   
   // Update UI with the image
   if (domElements.previewContainer) {
@@ -882,6 +949,12 @@ function handleCaptureComplete(data, shouldAnalyze = true) {
       log('Preview image loaded successfully');
       updateStatus(STATUS.ACTIVE, 'Image captured and ready for analysis');
       
+      // Show image dimensions if available
+      if (this.naturalWidth && this.naturalHeight) {
+        log(`Image dimensions: ${this.naturalWidth} x ${this.naturalHeight}`);
+        // Optionally show dimensions in UI
+      }
+      
       // Check if we're in auto test mode
       const inAutoTestMode = localStorage.getItem('autoTestMode') === 'true';
       if (inAutoTestMode) {
@@ -896,10 +969,18 @@ function handleCaptureComplete(data, shouldAnalyze = true) {
     domElements.previewImage.onerror = function() {
       log('Error loading preview image', { dataUrlLength: data.dataUrl.length });
       updateStatus(STATUS.ERROR, 'Error displaying captured image');
+      // Try to recover by falling back to a request for current state
+      requestCurrentState();
     };
     
     // Actually set the image src
-    domElements.previewImage.src = data.dataUrl;
+    try {
+      domElements.previewImage.src = data.dataUrl;
+    } catch (err) {
+      log('Exception setting image src:', err);
+      updateStatus(STATUS.ERROR, 'Error displaying image');
+      return;
+    }
   }
   
   // Hide selection info once we have an image
@@ -1083,6 +1164,19 @@ function checkOngoingSession() {
   });
 }
 
+// Function to stop the capture countdown timer
+function stopCaptureCountdown() {
+  if (window.captureCountdownTimer) {
+    clearInterval(window.captureCountdownTimer);
+    window.captureCountdownTimer = null;
+    if (domElements.nextCaptureTimer) {
+      domElements.nextCaptureTimer.textContent = '--';
+      domElements.nextCaptureTimer.classList.remove('bg-warning');
+      domElements.nextCaptureTimer.classList.add('bg-primary');
+    }
+  }
+}
+
 // Update session UI based on current session
 function updateSessionUI() {
   if (!currentSession) {
@@ -1091,6 +1185,7 @@ function updateSessionUI() {
     domElements.sessionStatus.className = 'badge bg-secondary';
     
     domElements.startSession.disabled = false;
+    domElements.startSession.textContent = 'Start Session'; // Reset button text
     domElements.pauseSession.disabled = true;
     domElements.stopSession.disabled = true;
     
@@ -1102,7 +1197,16 @@ function updateSessionUI() {
     domElements.apiCallCount.textContent = '0';
     domElements.rateLimitCount.textContent = '0';
     
+    stopCaptureCountdown(); // Make sure countdown stops
     return;
+  }
+  
+  // Add another safety check inside the main logic
+  if (!currentSession) {
+    log("Error: currentSession became null unexpectedly within updateSessionUI's else block.");
+    // Schedule reset
+    setTimeout(updateSessionUI, 0);
+    return; // Exit to prevent further errors
   }
   
   // Update status based on session state
@@ -1117,20 +1221,23 @@ function updateSessionUI() {
     domElements.sessionStatus.textContent = 'Paused';
     domElements.sessionStatus.className = 'badge bg-warning text-dark';
     
-    domElements.startSession.disabled = true;
+    domElements.startSession.disabled = false; // Enable to allow resume
+    domElements.startSession.textContent = 'Resume'; // Change text for resume
     domElements.pauseSession.disabled = true;
     domElements.stopSession.disabled = false;
   } else {
     domElements.sessionStatus.textContent = 'Completed';
-    domElements.sessionStatus.className = 'badge bg-info text-dark';
+    domElements.sessionStatus.className = 'badge bg-secondary'; // Changed from info to secondary
     
     domElements.startSession.disabled = false;
+    domElements.startSession.textContent = 'Start Session'; // Reset text
     domElements.pauseSession.disabled = true;
     domElements.stopSession.disabled = true;
   }
   
-  // Update session stats
-  domElements.sessionStartTime.textContent = formatDateTime(new Date(currentSession.startTime));
+  // Update session stats with safety checks
+  domElements.sessionStartTime.textContent = currentSession.startTime ? 
+    formatDateTime(new Date(currentSession.startTime)) : '--';
   domElements.captureCount.textContent = currentSession.captureCount || '0';
   domElements.apiCallCount.textContent = currentSession.apiCallCount || '0';
   domElements.rateLimitCount.textContent = currentSession.rateLimitCount || '0';
@@ -1148,11 +1255,7 @@ function updateSessionUI() {
     startCaptureCountdown(nextCaptureTime);
   } else {
     // No next capture, show placeholder
-    if (window.captureCountdownTimer) {
-      clearInterval(window.captureCountdownTimer);
-      window.captureCountdownTimer = null;
-    }
-    domElements.nextCaptureTimer.textContent = '--';
+    stopCaptureCountdown();
   }
   
   // Update selected area info if present
@@ -1168,6 +1271,18 @@ function updateSessionUI() {
 
 // Start a new monitoring session
 function handleStartSession() {
+  // Check for paused state FIRST
+  if (currentSession && currentSession.status === 'paused') {
+    handleResumeSession(); // Call resume function
+    return; // Don't proceed to start new session
+  }
+
+  // If already active, do nothing
+  if (currentSession && currentSession.status === 'active') {
+    updateStatus('warning', "Session already active.");
+    return;
+  }
+  
   log('Starting new monitoring session');
   const prompt = domElements.monitorPrompt.value.trim();
   
@@ -1187,46 +1302,125 @@ function handleStartSession() {
   // Update status
   updateStatus('processing', 'Starting session...');
   
-  // First check if we have a selected area from the state
-  chrome.runtime.sendMessage({
-    action: 'startSession',
-    selectedArea: selectedArea,
-    prompt: prompt,
-    conversationMode: conversationMode
+  // Get the active tab and window information
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (!tabs || tabs.length === 0) {
+      updateStatus('error', 'Cannot start session: No active tab found.');
+      domElements.startSession.disabled = false;
+      return;
+    }
+    
+    const activeTab = tabs[0];
+    const initialTabId = activeTab.id;
+    const initialWindowId = activeTab.windowId;
+    
+    // First check if we have a selected area from the state
+    chrome.runtime.sendMessage({
+      action: 'startSession',
+      selectedArea: selectedArea,
+      prompt: prompt,
+      conversationMode: conversationMode,
+      tabId: initialTabId,
+      windowId: initialWindowId
+    }, response => {
+      if (chrome.runtime.lastError) {
+        log('Error starting session:', chrome.runtime.lastError);
+        domElements.startSession.disabled = false;
+        updateStatus('error', 'Failed to start session: ' + chrome.runtime.lastError.message);
+        return;
+      }
+      
+      if (!response || !response.success) {
+        log('Failed to start session:', response?.error || 'Unknown error');
+        domElements.startSession.disabled = false;
+        updateStatus('error', 'Failed to start session');
+        return;
+      }
+      
+      // Check if response.session is null or undefined
+      if (!response.session) {
+        log('Error: Received null session from background');
+        domElements.startSession.disabled = false;
+        updateStatus('error', 'Failed to start session: Session data missing');
+        return;
+      }
+      
+      log('Session started successfully');
+      
+      // Store the session data
+      currentSession = response.session;
+      
+      // Make sure tab and window IDs are captured in the session
+      if (currentSession && !currentSession.tabId) {
+        currentSession.tabId = initialTabId;
+        log('Added tabId to session:', initialTabId);
+      }
+      
+      if (currentSession && !currentSession.windowId) {
+        currentSession.windowId = initialWindowId;
+        log('Added windowId to session:', initialWindowId);
+      }
+      
+      // Save the session with updated tab/window IDs
+      if (currentSession) {
+        saveSession(currentSession);
+      }
+      
+      // Update UI
+      updateSessionUI();
+      
+      // Reset session stats display
+      if (currentSession && currentSession.startTime) {
+        domElements.sessionStartTime.textContent = formatDateTime(new Date(currentSession.startTime));
+      } else {
+        domElements.sessionStartTime.textContent = '--';
+      }
+      
+      domElements.sessionDuration.textContent = '00:00:00';
+      domElements.captureCount.textContent = currentSession?.captureCount || '0';
+      domElements.lastCaptureTime.textContent = '--';
+      domElements.nextCaptureTimer.textContent = 'Starting...';
+      domElements.apiCallCount.textContent = currentSession?.apiCallCount || '0';
+      domElements.rateLimitCount.textContent = currentSession?.rateLimitCount || '0';
+      
+      // Start session timer
+      startSessionTimer();
+    });
+  });
+}
+
+// Add function to handle resuming a paused session
+function handleResumeSession() {
+  if (!currentSession || currentSession.status !== 'paused') {
+    log('No paused session to resume.');
+    return;
+  }
+  
+  log('Resuming session...');
+  updateStatus('processing', 'Resuming session...');
+  
+  // Disable buttons during processing
+  domElements.startSession.disabled = true;
+  domElements.pauseSession.disabled = true;
+  domElements.stopSession.disabled = true;
+
+  // Send message to background to resume
+  chrome.runtime.sendMessage({ 
+    action: 'resumeSession' 
   }, response => {
-    if (chrome.runtime.lastError) {
-      log('Error starting session:', chrome.runtime.lastError);
-      domElements.startSession.disabled = false;
-      updateStatus('error', 'Failed to start session');
+    if (chrome.runtime.lastError || !response?.success) {
+      updateStatus('error', "Failed to resume session in background.");
+      log("Error resuming session", chrome.runtime.lastError || response?.error);
+      updateSessionUI(); // Reset UI state
       return;
     }
     
-    if (!response || !response.success) {
-      log('Failed to start session:', response?.error || 'Unknown error');
-      domElements.startSession.disabled = false;
-      updateStatus('error', 'Failed to start session');
-      return;
-    }
-    
-    log('Session started successfully');
-    
-    // Store the session data
+    log("Background confirmed session resume", response.session);
+    // Background will send 'sessionUpdate', but update the session data here for immediate feedback
     currentSession = response.session;
-    
-    // Update UI
     updateSessionUI();
-    
-    // Reset session stats
-    domElements.sessionStartTime.textContent = formatDateTime(new Date(currentSession.startTime));
-    domElements.sessionDuration.textContent = '00:00:00';
-    domElements.captureCount.textContent = '0';
-    domElements.lastCaptureTime.textContent = '--';
-    domElements.nextCaptureTimer.textContent = 'Starting...';
-    domElements.apiCallCount.textContent = '0';
-    domElements.rateLimitCount.textContent = '0';
-    
-    // Start session timer
     startSessionTimer();
+    updateStatus('active', 'Session resumed');
   });
 }
 
@@ -1766,7 +1960,7 @@ function loadHistoryData() {
       // Actions column
       const actionsCell = document.createElement('td');
       const actionsDiv = document.createElement('div');
-      actionsDiv.className = 'btn-group btn-group-sm';
+      actionsDiv.className = 'btn-group btn-group-sm d-flex justify-content-between';
       
       const viewBtn = document.createElement('button');
       viewBtn.className = 'btn btn-outline-primary btn-sm';
@@ -1786,9 +1980,17 @@ function loadHistoryData() {
       deleteBtn.title = 'Delete';
       deleteBtn.dataset.id = response.id;
       
+      // Add delete session button
+      const deleteSessionBtn = document.createElement('button');
+      deleteSessionBtn.className = 'btn btn-outline-danger btn-sm delete-session-btn';
+      deleteSessionBtn.innerHTML = '<i class="bi bi-trash-fill"></i>';
+      deleteSessionBtn.title = 'Delete Session';
+      deleteSessionBtn.dataset.sessionId = response.sessionId;
+      
       actionsDiv.appendChild(viewBtn);
       actionsDiv.appendChild(exportBtn);
       actionsDiv.appendChild(deleteBtn);
+      actionsDiv.appendChild(deleteSessionBtn);
       actionsCell.appendChild(actionsDiv);
       row.appendChild(actionsCell);
       
@@ -1797,6 +1999,7 @@ function loadHistoryData() {
       viewBtn.addEventListener('click', () => handleViewResponse(response.id));
       exportBtn.addEventListener('click', () => handleExportResponse(response.id));
       deleteBtn.addEventListener('click', () => handleDeleteResponse(response.id));
+      deleteSessionBtn.addEventListener('click', () => handleDeleteSession(response.sessionId));
       
       // Add row to table
       domElements.historyTableBody.appendChild(row);
@@ -1947,6 +2150,37 @@ function handleDeleteResponse(id) {
       
       // Refresh history
       loadHistoryData();
+    });
+  });
+}
+
+// Handle delete session action
+function handleDeleteSession(sessionId) {
+  if (!confirm('Are you sure you want to delete ALL data for this session?')) {
+    return;
+  }
+  
+  // Get both responses and sessions from storage
+  chrome.storage.local.get([STORAGE_KEYS.RESPONSES, STORAGE_KEYS.SESSIONS], (result) => {
+    let responses = result[STORAGE_KEYS.RESPONSES] || [];
+    let sessions = result[STORAGE_KEYS.SESSIONS] || [];
+    
+    // Filter out responses for this session
+    responses = responses.filter(r => r.sessionId !== sessionId);
+    
+    // Filter out the session itself
+    sessions = sessions.filter(s => s.id !== sessionId);
+    
+    // Save the filtered data back to storage
+    chrome.storage.local.set({
+      [STORAGE_KEYS.RESPONSES]: responses,
+      [STORAGE_KEYS.SESSIONS]: sessions
+    }, () => {
+      log(`Session ${sessionId} and all its data deleted`);
+      
+      // Refresh history and session filter
+      loadHistoryData();
+      loadSessionsIntoFilter();
     });
   });
 }
@@ -2233,6 +2467,44 @@ function handleExportStorage() {
 // Handle clear storage button
 function handleClearStorage() {
   // Implementation of handleClearStorage function
+}
+
+// Handle clear all local storage button
+function handleClearAllLocalStorage() {
+  if (!confirm('⚠️ WARNING: This will delete ALL extension data! ⚠️\n\nThis is irreversible and will clear ALL settings, sessions, responses, and images.\n\nAre you absolutely sure?')) {
+    return;
+  }
+  
+  // Double-check with another confirmation
+  if (!confirm('FINAL WARNING: All data will be permanently deleted.\n\nClick OK to proceed with deletion.')) {
+    return;
+  }
+  
+  // Clear all local storage
+  chrome.storage.local.clear(() => {
+    if (chrome.runtime.lastError) {
+      log('Error clearing storage:', chrome.runtime.lastError);
+      return;
+    }
+    
+    log('All local storage cleared');
+    
+    // Reset UI state
+    loadHistoryData();
+    loadSessionsIntoFilter();
+    updateStorageUsage();
+    loadSettings();
+    
+    // Clear any active sessions
+    currentSession = null;
+    updateSessionUI();
+    
+    // Reset the UI state
+    localStorage.removeItem('autoTestMode');
+    
+    // Show confirmation
+    alert('All local storage has been cleared successfully.');
+  });
 }
 
 // Load UI state from storage
@@ -2587,4 +2859,65 @@ function handleSessionUpdate(sessionData) {
       domElements.nextCaptureTimer.textContent = '--';
     }
   }
+}
+
+// Handle export all history
+function handleExportAllHistory() {
+  chrome.storage.local.get([STORAGE_KEYS.RESPONSES, STORAGE_KEYS.SESSIONS], (result) => {
+    let responses = result[STORAGE_KEYS.RESPONSES] || [];
+    let sessions = result[STORAGE_KEYS.SESSIONS] || [];
+    
+    const sessionId = domElements.sessionFilter.value;
+    
+    // Filter responses by session if needed
+    if (sessionId !== 'all') {
+      responses = responses.filter(r => r.sessionId === sessionId);
+    }
+    
+    if (responses.length === 0) {
+      alert('No history data to export.');
+      return;
+    }
+    
+    // Create exportable data with sessions and responses
+    const exportData = {
+      exportedAt: new Date().toISOString(),
+      sessions: sessions,
+      responses: responses.map(response => ({
+        id: response.id,
+        sessionId: response.sessionId,
+        timestamp: response.timestamp,
+        model: response.model,
+        prompt: response.prompt,
+        response: response.responseText,
+        imageSize: response.imageSize,
+        imageData: response.imageData // Base64 encoded image data
+      }))
+    };
+    
+    // Create download link
+    const dataStr = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([dataStr], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    
+    const filename = sessionId === 'all' ? 
+      `all-history-${formatDateTime(new Date()).replace(/[: ]/g, '-')}.json` : 
+      `session-${sessionId}-${formatDateTime(new Date()).replace(/[: ]/g, '-')}.json`;
+    
+    // Create temporary link and trigger download
+    const a = document.createElement('a');
+    a.setAttribute('href', url);
+    a.setAttribute('download', filename);
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    
+    // Clean up
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+    
+    log(`Exported ${responses.length} responses${sessionId !== 'all' ? ' for session ' + sessionId : ''}`);
+  });
 }

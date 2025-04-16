@@ -112,7 +112,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle messages from the original extension functionality
   if (message.message === 'capture' || message.message === 'active') {
     // Pass to original handler
-    handleOriginalExtensionMessage(message, sender, sendResponse);
+    handleOriginalExtensionMessage(message, sender, res);
     return true; // Keep channel open for original handler
   }
 
@@ -129,8 +129,21 @@ function handleNewExtensionMessage(message, sender, sendResponse) {
       break;
 
     case 'captureViewport':
-      captureViewport(sender.tab);
-      sendResponse({ success: true });
+      if (!sender.tab) {
+        log('No sender tab info for captureViewport, querying active tab');
+        chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
+          if (!tabs || tabs.length === 0) {
+            log('No active tab found for captureViewport');
+            updateBackgroundState({ status: { type: 'error', message: 'Failed to find active tab for capture' } });
+            sendResponse({ success: false, error: 'No active tab found' });
+            return;
+          }
+          captureViewport(tabs[0], { callback: sendResponse });
+        });
+      } else {
+        captureViewport(sender.tab, { callback: sendResponse });
+      }
+      return true; // Keep channel open for async response
       break;
 
     case 'startSelection':
@@ -212,7 +225,16 @@ function handleNewExtensionMessage(message, sender, sendResponse) {
 
     // Session management messages from popup
     case 'startSession':
-      handleStartSession(message.selectedArea, message.prompt);
+      // Pass tabId and windowId from message to handleStartSession
+      handleStartSession(
+        message.selectedArea, 
+        message.prompt, 
+        { 
+          conversationMode: message.conversationMode,
+          tabId: message.tabId,
+          windowId: message.windowId
+        }
+      );
       sendResponse({ success: true, session: backgroundState.currentSession });
       break;
     case 'pauseSession':
@@ -228,6 +250,11 @@ function handleNewExtensionMessage(message, sender, sendResponse) {
       sendResponse({ success: true });
       break;
 
+    case 'resumeSession':
+      const resumeResult = handleResumeSessionLogic();
+      sendResponse(resumeResult);
+      break;
+
     default:
       log('Unknown action in new handler:', message.action);
       sendResponse({ success: false, error: 'Unknown action' });
@@ -237,8 +264,8 @@ function handleNewExtensionMessage(message, sender, sendResponse) {
 
 // Handler for original extension messages (moved to its own function)
 function handleOriginalExtensionMessage(req, sender, res) {
-    if (req.message === 'capture') {
-      chrome.tabs.query({active: true, currentWindow: true}, (tab) => {
+  if (req.message === 'capture') {
+    chrome.tabs.query({active: true, currentWindow: true}, (tab) => {
         // Ensure we have a valid tab ID
         const tabId = tab?.[0]?.id;
         if (!tabId) {
@@ -256,8 +283,8 @@ function handleOriginalExtensionMessage(req, sender, res) {
         });
       });
     } else if (req.message === 'active') {
-      if (req.active) {
-        chrome.storage.sync.get((config) => {
+    if (req.active) {
+      chrome.storage.sync.get((config) => {
           const tabId = sender.tab?.id;
           if (!tabId) return;
           let title = 'Screenshot Capture'; // Default
@@ -382,10 +409,38 @@ function stopMonitoringAlarm() {
 // Capture viewport
 function captureViewport(tab, options = {}) {
   updateBackgroundState({ status: { type: 'processing', message: 'Capturing viewport...' } });
-  chrome.tabs.captureVisibleTab(tab?.windowId, { format: 'jpeg', quality: 70 }, (dataUrl) => {
+  
+  // If tab info is missing, log error and notify caller
+  if (!tab || !tab.windowId) {
+    const errorMsg = 'Missing tab or windowId for capture';
+    log(errorMsg);
+    updateBackgroundState({ status: { type: 'error', message: 'Failed to capture: Missing tab info' } });
+    
+    // Notify caller of failure if callback provided
+    if (options.callback) {
+      options.callback({ success: false, error: errorMsg });
+    }
+    
+    // Clear busy flag and schedule next if this was for monitoring
+    if (options.monitorSession) {
+      isAnalysisInProgress = false;
+      scheduleNextMonitoringCapture(true);
+    }
+    return;
+  }
+  
+  log(`Capturing viewport from window ${tab.windowId}`);
+  
+  chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 95 }, (dataUrl) => {
     if (chrome.runtime.lastError) {
+      const error = chrome.runtime.lastError.message || 'Unknown error';
       log('Error capturing viewport', chrome.runtime.lastError);
-      updateBackgroundState({ status: { type: 'error', message: 'Failed to capture viewport' } });
+      updateBackgroundState({ status: { type: 'error', message: 'Failed to capture viewport: ' + error } });
+      
+      // Notify caller of failure if callback provided
+      if (options.callback) {
+        options.callback({ success: false, error: error });
+      }
       
       // Clear busy flag and schedule next if this was for monitoring
       if (options.monitorSession) {
@@ -394,9 +449,10 @@ function captureViewport(tab, options = {}) {
       }
       return;
     }
+    
     const capturedData = { dataUrl, timestamp: new Date().toISOString() };
     
-    // Update background state to clear selectedArea (viewport captures don't use selectedArea)
+    // Update background state with the captured image
     updateBackgroundState({ 
       capturedImage: capturedData, 
       status: { type: 'active', message: 'Viewport captured' } 
@@ -405,7 +461,12 @@ function captureViewport(tab, options = {}) {
     // Process the captured image with the provided options
     handleCapturedImage(capturedData, null, options);
     
-    log('Viewport captured');
+    log('Viewport captured successfully');
+    
+    // Notify caller of success if callback provided
+    if (options.callback) {
+      options.callback({ success: true, data: capturedData });
+    }
   });
 }
 
@@ -485,9 +546,16 @@ function handleAreaSelected(data, tab) {
 
 // Capture viewport area based on selection
 function captureViewportArea(area, tab, options = {}) {
-  if (!area) {
-    log('Attempted to capture area, but no area data provided');
-    updateBackgroundState({ status: { type: 'warning', message: 'No area selected' } });
+  // Validate area parameter
+  if (!area || typeof area !== 'object' || !area.width || !area.height) {
+    const errorMsg = 'Invalid area parameter for capture';
+    log(errorMsg, area);
+    updateBackgroundState({ status: { type: 'warning', message: 'Invalid selection area' } });
+    
+    // Notify caller of failure
+    if (options.callback) {
+      options.callback({ success: false, error: errorMsg });
+    }
     
     // Clear busy flag and schedule next if this was for monitoring
     if (options.monitorSession) {
@@ -497,16 +565,31 @@ function captureViewportArea(area, tab, options = {}) {
     return;
   }
   
-  log('captureViewportArea called with area:', area);
-  updateBackgroundState({ status: { type: 'processing', message: 'Capturing area...' } });
+  // Normalize area properties - handle different naming conventions from content script
+  const normalizedArea = {
+    left: area.left || area.x || 0,
+    top: area.top || area.y || 0,
+    width: area.width || area.w || 0,
+    height: area.height || area.h || 0,
+    devicePixelRatio: area.devicePixelRatio || window.devicePixelRatio || 1
+  };
+  
+  log('captureViewportArea called with normalized area:', normalizedArea);
+  updateBackgroundState({ status: { type: 'processing', message: 'Capturing selected area...' } });
   
   // Ensure we have tab info
   if (!tab || !tab.windowId) {
     log('Missing tab info for captureViewportArea, querying active tab');
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
       if (!tabs || tabs.length === 0) {
-        log('No active tab found for captureViewportArea');
+        const errorMsg = 'No active tab found for captureViewportArea';
+        log(errorMsg);
         updateBackgroundState({ status: { type: 'error', message: 'Failed to find active tab for capture' } });
+        
+        // Notify caller of failure
+        if (options.callback) {
+          options.callback({ success: false, error: errorMsg });
+        }
         
         // Clear busy flag and schedule next if this was for monitoring
         if (options.monitorSession) {
@@ -517,17 +600,24 @@ function captureViewportArea(area, tab, options = {}) {
       }
       // Recursive call with proper tab
       log('Found active tab, retrying captureViewportArea');
-      captureViewportArea(area, tabs[0], options);
+      captureViewportArea(normalizedArea, tabs[0], options);
     });
     return;
   }
   
   log('Capturing viewport from tab:', tab.id, 'window:', tab.windowId);
+  
   // Ensure we're capturing from the proper window
   chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 95 }, (dataUrl) => {
     if (chrome.runtime.lastError) {
-      log('Error capturing viewport for area crop', chrome.runtime.lastError);
+      const errorMsg = `Error capturing viewport for area crop: ${chrome.runtime.lastError.message}`;
+      log(errorMsg, chrome.runtime.lastError);
       updateBackgroundState({ status: { type: 'error', message: 'Failed to capture for crop' } });
+      
+      // Notify caller of failure
+      if (options.callback) {
+        options.callback({ success: false, error: errorMsg });
+      }
       
       // Clear busy flag and schedule next if this was for monitoring
       if (options.monitorSession) {
@@ -540,21 +630,33 @@ function captureViewportArea(area, tab, options = {}) {
     log('Successfully captured viewport, proceeding to crop', { windowId: tab.windowId });
     
     // Try to crop the image in the background first
-    cropImage(dataUrl, area)
+    cropImage(dataUrl, normalizedArea)
       .then(croppedDataUrl => {
         log('Image cropped successfully in background, size:', croppedDataUrl.length);
         const capturedData = { dataUrl: croppedDataUrl, timestamp: new Date().toISOString() };
-        handleCapturedImage(capturedData, area, options);
+        
+        // Notify caller of success if callback provided
+        if (options.callback) {
+          options.callback({ success: true, data: capturedData });
+        }
+        
+        handleCapturedImage(capturedData, normalizedArea, options);
       })
       .catch(error => {
         log('Error cropping image in background, trying content script method', error);
         
         // Try the content script method as a first fallback
-        cropImageInContentScript(tab.id, dataUrl, area)
+        cropImageInContentScript(tab.id, dataUrl, normalizedArea)
           .then(croppedDataUrl => {
             log('Image cropped successfully in content script, size:', croppedDataUrl.length);
             const capturedData = { dataUrl: croppedDataUrl, timestamp: new Date().toISOString() };
-            handleCapturedImage(capturedData, area, options);
+            
+            // Notify caller of success if callback provided
+            if (options.callback) {
+              options.callback({ success: true, data: capturedData });
+            }
+            
+            handleCapturedImage(capturedData, normalizedArea, options);
           })
           .catch(contentError => {
             log('Content script cropping also failed, using full viewport as fallback', contentError);
@@ -572,6 +674,15 @@ function captureViewportArea(area, tab, options = {}) {
               capturedImage: fallbackData,
               status: { type: 'warning', message: 'Using full viewport (cropping failed)' }
             });
+            
+            // Notify caller with fallback data
+            if (options.callback) {
+              options.callback({ 
+                success: true, 
+                data: fallbackData,
+                warning: 'Using full viewport as fallback' 
+              });
+            }
             
             // Send the full image to popup
             broadcastMessage({
@@ -1158,8 +1269,8 @@ function log(message, data) {
 
 // --- Session Management --- //
 
-function handleStartSession(initialSelectedArea, initialPrompt) {
-    log('Starting new session...');
+function handleStartSession(initialSelectedArea, initialPrompt, options = {}) {
+    log('Starting new session...', options);
     if (backgroundState.currentSession && backgroundState.currentSession.status !== 'completed') {
         log('Cannot start new session, one is already active or paused.');
         updateBackgroundState({ status: { type: 'warning', message: 'Session already running' } });
@@ -1179,6 +1290,11 @@ function handleStartSession(initialSelectedArea, initialPrompt) {
             rateLimitCount: 0,
             lastCaptureTime: null,
             nextScheduledCapture: null, // Will be set after first capture
+            
+            // Store tab and window IDs from options
+            tabId: options?.tabId,
+            windowId: options?.windowId,
+            
             // Store relevant settings for this session
             settings: {
                 monitorInterval: settings.monitorInterval,
@@ -1187,11 +1303,21 @@ function handleStartSession(initialSelectedArea, initialPrompt) {
                 apiKey: settings.apiKey,
                 enableNotifications: settings.enableNotifications,
                 autoBackoff: settings.autoBackoff,
-                conversationMode: settings.conversationMode || false
+                conversationMode: options?.conversationMode || settings.conversationMode || false
             },
             selectedArea: initialSelectedArea || backgroundState.selectedArea, // Use area from popup or background state
             conversationHistory: [] // Initialize conversation history
         };
+        
+        // Log tab and window IDs for debugging
+        if (options?.tabId && options?.windowId) {
+            log('Session initialized with tab/window IDs:', { 
+                tabId: options.tabId, 
+                windowId: options.windowId 
+            });
+        } else {
+            log('Warning: Session initialized without tab/window IDs');
+        }
 
         updateBackgroundState({ 
             currentSession: newSession, 
@@ -1232,22 +1358,32 @@ function handlePauseSession() {
     broadcastMessage({ action: 'sessionUpdate', session: updatedSession });
 }
 
-function handleResumeSession() { // Potentially useful if pause/resume UI exists
+function handleResumeSessionLogic() {
     if (!backgroundState.currentSession || backgroundState.currentSession.status !== 'paused') {
-        log('No paused session to resume.');
-        return;
+        log('Background: No paused session to resume.');
+        return { success: false, error: 'No paused session to resume' };
     }
-    log('Resuming session...');
-    const updatedSession = {
-        ...backgroundState.currentSession,
-        status: 'active',
-        resumeTime: new Date().toISOString(),
-        // Reset pauseTime to avoid incorrect duration calculation on next pause
-        pauseTime: null
-    };
-    updateBackgroundState({ currentSession: updatedSession, status: { type: 'active', message: 'Session resumed' } });
-    saveSession(updatedSession);
-    startMonitoringAlarm(); // Restart the interval timer
+    
+    log('Background: Resuming session...');
+    
+    // Update the session status
+    backgroundState.currentSession.status = 'active';
+    backgroundState.currentSession.resumeTime = new Date().toISOString(); // Mark resume time
+    
+    // Update UI and save
+    updateBackgroundState({ 
+        currentSession: backgroundState.currentSession, 
+        status: { type: 'active', message: 'Session resumed' } 
+    });
+    saveSession(backgroundState.currentSession);
+    
+    // Notify popup and other listeners
+    broadcastMessage({ action: 'sessionUpdate', session: backgroundState.currentSession });
+    
+    // Start the monitoring loop again
+    startMonitoringAlarm(); // This will clear any old alarms and start fresh
+    
+    return { success: true, session: backgroundState.currentSession };
 }
 
 function handleStopSession() {
@@ -1363,6 +1499,44 @@ function captureForMonitoring() {
     log('Automatic capture triggered for monitoring');
     const session = backgroundState.currentSession;
     
+    // Use stored Tab ID and Window ID
+    const targetTabId = session.tabId;
+    const targetWindowId = session.windowId;
+    
+    // Check if we have valid tab and window IDs
+    if (!targetTabId || !targetWindowId) {
+        log('Warning: Session is missing target tabId or windowId. Attempting to use active tab as fallback.');
+        
+        // Try to use active tab as fallback
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            if (!tabs || tabs.length === 0) {
+                log('Error: Failed to find any active tab as fallback. Stopping session.');
+                updateBackgroundState({ status: { type: 'error', message: 'No active tab found. Session stopped.' }});
+                handleStopSession(); // Stop the session permanently
+                isAnalysisInProgress = false;
+                return;
+            }
+            
+            const activeTab = tabs[0];
+            
+            // Update the session with the active tab's information
+            session.tabId = activeTab.id;
+            session.windowId = activeTab.windowId;
+            
+            log(`Using active tab as fallback. Tab ID: ${activeTab.id}, Window ID: ${activeTab.windowId}`);
+            
+            // Save the updated session
+            updateBackgroundState({ currentSession: session });
+            saveSession(session);
+            
+            // Now retry the capture with the updated tab info
+            setTimeout(() => captureForMonitoring(), 100);
+        });
+        return;
+    }
+    
+    log(`Attempting capture on Tab ID: ${targetTabId}, Window ID: ${targetWindowId}`);
+    
     // Update session stats BEFORE capture
     session.captureCount = (session.captureCount || 0) + 1;
     session.lastCaptureTime = new Date().toISOString();
@@ -1377,36 +1551,146 @@ function captureForMonitoring() {
       session: session
     });
     
-    // Find an active tab to capture from (best effort)
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const targetTab = tabs[0];
-        if (!targetTab) {
-            log('Monitor capture: No active tab found.');
-            isAnalysisInProgress = false; // Clear busy flag on error
-            scheduleNextMonitoringCapture(true); // Schedule next attempt anyway
+    // Prepare monitoring session info for analysis
+    const monitorSessionInfo = {
+        sessionId: session.id,
+        prompt: session.settings.monitorPrompt || 'Analyze this image',
+        conversationMode: session.settings.conversationMode || false
+    };
+    
+    // FIXED: Always prioritize the session's selectedArea - this is what user initially selected
+    const areaToCapture = session.selectedArea;
+    
+    if (!areaToCapture) {
+        log('Warning: No selected area found in session for monitoring. Will use full viewport.');
+    } else {
+        log('Using selected area from session for monitoring:', areaToCapture);
+    }
+    
+    // Use targetWindowId for captureVisibleTab
+    chrome.tabs.captureVisibleTab(targetWindowId, { format: 'jpeg', quality: 95 }, (dataUrl) => {
+        if (chrome.runtime.lastError) {
+            log(`Error capturing window ${targetWindowId} for tab ${targetTabId}`, chrome.runtime.lastError);
+            
+            // Handle Capture Error
+            if (chrome.runtime.lastError.message.includes("No tab with id") ||
+                chrome.runtime.lastError.message.includes("No window with id")) {
+                log(`Target tab ${targetTabId} or window ${targetWindowId} not found. Trying to recover...`);
+                
+                // Try to use active tab as fallback
+                chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+                    if (!tabs || tabs.length === 0) {
+                        log('Recovery failed: No active tab found. Stopping session.');
+                        updateBackgroundState({ status: { type: 'error', message: 'Target window/tab closed. Session stopped.' }});
+                        handleStopSession(); // Stop the session permanently
+                        isAnalysisInProgress = false;
+                        return;
+                    }
+                    
+                    const activeTab = tabs[0];
+                    
+                    // Update session with new tab info
+                    session.tabId = activeTab.id;
+                    session.windowId = activeTab.windowId;
+                    updateBackgroundState({ 
+                        currentSession: session,
+                        status: { type: 'warning', message: 'Tab changed, recovered using current tab' }
+                    });
+                    saveSession(session);
+                    
+                    log('Recovered session with new tab/window IDs, scheduling next capture');
+                    // Schedule next capture attempt
+                    scheduleNextMonitoringCapture(true, 10); // Try again in 10 seconds
+                });
+            } else {
+                // Other capture error (e.g., page loading, protected page)
+                updateBackgroundState({ status: { type: 'warning', message: 'Capture failed, retrying next interval.' }});
+                // Schedule next attempt even on capture error
+                scheduleNextMonitoringCapture(true);
+            }
+            isAnalysisInProgress = false; // Clear busy flag
             return;
         }
-
-        // Prepare monitoring session info for analysis
-        const monitorSessionInfo = {
-            sessionId: session.id,
-            prompt: session.settings.monitorPrompt || 'Analyze this image',
-            conversationMode: session.settings.conversationMode || false
-        };
-
-        if (session.selectedArea) {
-            log('Monitor: Capturing selected area');
-            captureViewportArea(session.selectedArea, targetTab, {
-              autoAnalyze: true,
-              monitorSession: monitorSessionInfo
-            });
-        } else {
-            log('Monitor: Capturing viewport');
-            captureViewport(targetTab, {
-              autoAnalyze: true,
-              monitorSession: monitorSessionInfo
-            });
-        }
+        
+        // Proceed with cropping/analysis if capture succeeded
+        log(`Successfully captured window ${targetWindowId}. Proceeding with processing for tab ${targetTabId}.`);
+        
+        // Check if the tab still exists
+        chrome.tabs.get(targetTabId, (tabDetails) => {
+            if(chrome.runtime.lastError || !tabDetails) {
+                log(`Tab ${targetTabId} disappeared after capture. Skipping analysis.`);
+                scheduleNextMonitoringCapture(true); // Schedule next
+                isAnalysisInProgress = false;
+                return;
+            }
+            
+            if (areaToCapture) {
+                log('Monitor: Processing selected area', areaToCapture);
+                
+                // FIXED: Ensure we normalize area properties for consistency
+                const normalizedArea = {
+                    left: areaToCapture.left || areaToCapture.x || 0,
+                    top: areaToCapture.top || areaToCapture.y || 0,
+                    width: areaToCapture.width || areaToCapture.w || 0,
+                    height: areaToCapture.height || areaToCapture.h || 0,
+                    devicePixelRatio: areaToCapture.devicePixelRatio || window.devicePixelRatio || 1
+                };
+                
+                // Use cropImage function first
+                cropImage(dataUrl, normalizedArea)
+                    .then(croppedDataUrl => {
+                        log('Image cropped successfully in background');
+                        handleCapturedImage({ 
+                            dataUrl: croppedDataUrl, 
+                            timestamp: new Date().toISOString(),
+                            // Add metadata about the crop to help with debugging
+                            cropInfo: {
+                                source: 'background',
+                                area: normalizedArea
+                            }
+                        }, normalizedArea, { autoAnalyze: true, monitorSession: monitorSessionInfo });
+                    })
+                    .catch(cropError => {
+                        log('Background cropping failed, trying content script method', cropError);
+                        
+                        // Try the content script method as fallback
+                        cropImageInContentScript(targetTabId, dataUrl, normalizedArea)
+                            .then(croppedDataUrl => {
+                                log('Image cropped successfully in content script');
+                                handleCapturedImage({ 
+                                    dataUrl: croppedDataUrl, 
+                                    timestamp: new Date().toISOString(),
+                                    cropInfo: {
+                                        source: 'content-script',
+                                        area: normalizedArea
+                                    }
+                                }, normalizedArea, { autoAnalyze: true, monitorSession: monitorSessionInfo });
+                            })
+                            .catch(contentError => {
+                                log('All cropping methods failed, using full viewport as last resort', contentError);
+                                // Use the full capture as fallback, but flag it
+                                handleCapturedImage({ 
+                                    dataUrl, 
+                                    timestamp: new Date().toISOString(), 
+                                    cropFailed: true,
+                                    cropInfo: {
+                                        error: 'All cropping methods failed',
+                                        attempted: true
+                                    }
+                                }, null, { autoAnalyze: true, monitorSession: monitorSessionInfo });
+                            });
+                    });
+            } else {
+                log('Monitor: No area selected, processing full viewport');
+                handleCapturedImage({ 
+                    dataUrl, 
+                    timestamp: new Date().toISOString(),
+                    cropInfo: {
+                        message: 'No area selected, using full viewport'
+                    }
+                }, null, { autoAnalyze: true, monitorSession: monitorSessionInfo });
+            }
+        });
     });
 }
 
