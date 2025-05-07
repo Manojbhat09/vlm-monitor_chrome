@@ -1,11 +1,20 @@
-# Screen Scoutr: Monitor & Analysis
+# Monitoring & Analysis with VLMs
 
 > **Transform your browser from a simple viewer to an intelligent guardian of your digital experience.**
 
 **Install: [Chrome]** 
 <!-- / **[Edge]** / **[Opera]** / **[Brave]** / **[Chromium]** / **[Vivaldi]** -->
 
+
 ![Screen Scoutr Logo](icons/default/128x128.png)
+
+---
+
+![npm](https://badgen.net/badge/npm/v1.6.6/blue)
+![coverage](https://badgen.net/badge/coverage/100%25/green)
+![chrome web store](https://badgen.net/badge/chrome/web%20store/blue?icon=chrome)
+
+
 
 ## 🔥 Features
 
